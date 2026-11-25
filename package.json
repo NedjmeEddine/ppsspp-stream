@@ -1,0 +1,13 @@
+{
+  "name": "ppsspp-stream",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test:ui": "node --test web/ui.test.mjs",
+    "test:disc": "node --test web/disc_reader.test.mjs",
+    "test:e2e": "node --test web/multi_game_e2e.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.1"
+  }
+}

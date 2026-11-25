@@ -1,0 +1,1 @@
+../externals/vfs-streamer/client/web/worker_b_core.mjs

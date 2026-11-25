@@ -1,0 +1,1 @@
+../externals/vfs-streamer/client/web/doorbell_worker.js

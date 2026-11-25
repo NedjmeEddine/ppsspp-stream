@@ -1,0 +1,1 @@
+../externals/vfs-streamer/client/web/vfs_offsets.js
