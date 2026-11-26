@@ -265,6 +265,8 @@ func (s *server) loadSnapshot() (*rootSnapshot, error) {
 			snap.closeAll()
 			return nil, errors.New("invalid games.json")
 		}
+		loadedGames := make([]gameEntry, 0, len(cat.Games))
+		seenEtags := make(map[uint64]string, len(cat.Games))
 		for _, g := range cat.Games {
 			if !validGameID.MatchString(g.ID) || g.Title == "" || g.DiscSize <= 0 || g.Platform != "psp" {
 				snap.closeAll()
@@ -283,9 +285,17 @@ func (s *server) loadSnapshot() (*rootSnapshot, error) {
 				log.Printf("server: warning, failed to load game %q: %v", g.ID, err)
 				continue
 			}
+			if prevID, dup := seenEtags[gs.header.BuildEtagHash]; dup {
+				gs.close()
+				snap.closeAll()
+				return nil, fmt.Errorf("duplicate BuildEtagHash %s between %q and %q", gs.buildEtagHex, prevID, g.ID)
+			}
+			seenEtags[gs.header.BuildEtagHash] = g.ID
 			snap.games[g.ID] = gs
+			loadedGames = append(loadedGames, g)
 		}
-		snap.catalogBytes = catBytes
+		cat.Games = loadedGames
+		snap.catalogBytes, _ = json.Marshal(cat)
 	} else {
 		if snap.rootGame == nil {
 			return nil, fmt.Errorf("no games.json or manifest.bin in %s", s.dataDir)
@@ -371,9 +381,18 @@ func (s *server) allowTelemetry(ip string) bool {
 		return true
 	}
 	if !ok && len(s.limiters) >= 4096 {
-		for k := range s.limiters {
-			delete(s.limiters, k)
-			break
+		var oldestKey string
+		var oldestTime time.Time
+		for k, entry := range s.limiters {
+			if now.Sub(entry.start) > time.Minute {
+				delete(s.limiters, k)
+			} else if oldestKey == "" || entry.start.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = entry.start
+			}
+		}
+		if len(s.limiters) >= 4096 && oldestKey != "" {
+			delete(s.limiters, oldestKey)
 		}
 	}
 	s.limiters[ip] = &clientWindow{start: now, count: 1}
@@ -587,6 +606,7 @@ func main() {
 		Handler:           s.handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
