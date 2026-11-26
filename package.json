@@ -11,7 +11,8 @@
   "scripts": {
     "test:ui": "node --test web/ui.test.mjs",
     "test:disc": "node --test web/disc_reader.test.mjs",
-    "test:e2e": "node --test web/multi_game_e2e.test.mjs"
+    "test:e2e": "node --test web/multi_game_e2e.test.mjs",
+    "test:core-ipc": "node --test web/core_vfs_ipc.test.mjs"
   },
   "devDependencies": {
     "playwright": "^1.65.1"
