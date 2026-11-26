@@ -183,7 +183,7 @@ function setupPortB() {
             try {
                 const arenaPages = Math.ceil(arenaBytes / 65536);
                 const initialPages = 1024 + arenaPages;
-                const maximumPages = Math.min(65536, initialPages + 4096);
+                const maximumPages = initialPages;
 
                 try {
                     wasmMemory = new WebAssembly.Memory({ initial: initialPages, maximum: maximumPages, shared: true });

@@ -43,7 +43,7 @@ wasm:
 	$(EMCXX) -std=c++20 -O2 -pthread -I. -I$(VFS_DIR) -Isrc -Isrc/disc_io -c src/disc_io/vfs_block_device.cpp -o $(BUILD_DIR)/embuild/vfs_block_device.o
 	$(EMCXX) -std=c++20 -O2 -pthread -I. -I$(VFS_DIR) -Isrc -Isrc/disc_io -c src/disc_io/psp_header.cpp -o $(BUILD_DIR)/embuild/psp_header.o
 	$(EMCXX) -O2 -pthread \
-	  -sIMPORTED_MEMORY=1 -sINITIAL_MEMORY=67108864 -sMAXIMUM_MEMORY=4294967296 -sALLOW_MEMORY_GROWTH=1 \
+	  -sIMPORTED_MEMORY=1 -sINITIAL_MEMORY=67108864 -sMAXIMUM_MEMORY=536870912 -sALLOW_MEMORY_GROWTH=0 \
 	  -sWASM_BIGINT \
 	  -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createVfsModule \
 	  -sEXPORTED_FUNCTIONS='["_vfs_init_arena","_vfs_attach_arena","_vfs_read_sync","_vfs_hint_cold","_vfs_save_write_sync","_vfs_save_read_sync","_vfs_fs_mount","_vfs_fs_unmount","_vfs_fs_stat","_vfs_fs_open","_vfs_fs_read","_vfs_fs_pread","_vfs_fs_seek","_vfs_fs_tell","_vfs_fs_close","_vfs_fs_hint_cold","_vfs_block_open","_vfs_block_read","_vfs_block_read_sectors","_vfs_block_size","_vfs_block_num_sectors","_vfs_block_hint_cold","_vfs_block_close","_vfs_block_identify","_vfs_client_ctx_size","_vfs_fs_struct_size","_aligned_alloc","_malloc","_free"]' \

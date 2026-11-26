@@ -73,3 +73,29 @@ All six items below were approved by the user. The five Layer-3 spikes are autho
 - [04-audio-streaming-backend.md](subproblems/04-audio-streaming-backend.md)
 - [05-memstick-opfs-bridge.md](subproblems/05-memstick-opfs-bridge.md)
 - [synthesis.md](synthesis.md) · [compat.json](compat.json)
+
+---
+
+## Senior Engineer Audit & Corrections (2026-11-26)
+
+Post-RDD review against the actual codebase (`Makefile`, `web/index.html`, `web/worker_a.js`, `web/worker_b.js`, `web/worker_b_core.mjs`, `web/vfs_offsets.js`) overrides three Phase 3/4 recommendations and flags research hygiene issues:
+
+### Research Integrity Notes
+- `repair_report.json` pruned **87** claims (`ANCHOR_MISMATCH` / `FETCH_FAILED`), leaving **223** claims (221 verified, 2 transient HTTP 503 on `sqlite.org`). The "310 `yaml:claim` blocks" count above is stale, and `synthesis.md` retains 3 dangling IDs (`PB-D23`, `PB-R03`, `WC-D23`).
+- All 14 `RC-*` recall-check IDs cited above (`RC-WM-*`, `RC-PB-*`, `RC-WC-*`, `RC-AS-*`, `RC-MO-*`) were never written as `yaml:claim` blocks or verified by `cite-check.py`.
+
+### Corrected Architectural Decisions for V1
+0. **Toolchain Pin → Emscripten `6.0.12` for V1 (defer `7.0.0` until architecture is proven):**
+   - Pin `emsdk 6.0.12` (matching `root-hunter/ppsspp-wasm @ 4d0564b`) for V1 stability; keep `7.0.0` as a post-V1 upgrade once the full pipeline works. Note: `6.0.12` is not yet installed in `~/.local/share/emsdk` (only `7.0.0` is currently installed), and `6.0.12` predates Emscripten commit `994494bf` (`MAXIMUM_MEMORY` with `IMPORTED_MEMORY` + `ALLOW_MEMORY_GROWTH=0`), so verify `make wasm` + `npm run test:disc` if rebuilding `web/vfs.wasm` on `6.0.12`.
+1. **`wasm-memory-topology` → Option B (Separate `WebAssembly.Memory` + Bounce Buffer), NOT `MAIN_MODULE`/`SIDE_MODULE`:**
+   - Do not use Emscripten dynamic linking (`SIDE_MODULE`) for PPSSPP + VFS. It adds `-fPIC`/GOT overhead, disables DCE, breaks across toolchain versions, and does not avoid GPL coupling in the same address space.
+   - Keep `web/vfs.wasm` and `cores/ppsspp/ppsspp.wasm` on independent `WebAssembly.Memory` instances bridged by the existing 4 MiB bounce buffer (`web/worker_a.js`). At PSP UMD rates (~1.8 MB/s), bounce copy cost is negligible (<0.1% CPU), and `web/vfs.wasm` can stay on `emsdk 7.0.0` even if the core pins `6.0.12`.
+   - Disable `-sALLOW_MEMORY_GROWTH=1` in `Makefile` (`-sALLOW_MEMORY_GROWTH=0`, fixed `initial === maximum` in `web/worker_a.js`) to eliminate `pthreads-mem-growth` overhead and V8 shared-memory growth traps while preserving `RETRY_SMALLER_POOL` (64 → 32 → 16 MB).
+2. **`webgl2-canvas-threading` → Test `OffscreenCanvas` First (Fresh `<canvas>` per Launch), Avoid `PROXY_ALWAYS`:**
+   - Fixed the real bug in `web/index.html`: removed `emuCanvas.getContext('2d')` from `drawBanner()` (now an HTML overlay) and added `resetEmulatorCanvas()` per game launch.
+   - Do not default to `EMSCRIPTEN_WEBGL_CONTEXT_PROXY_ALWAYS`; proxying thousands of GL calls/frame to the main thread risks missing the 30 FPS budget. Firefox bug 1972240 only triggers when the main thread spin-waits on SAB, which this shell never does.
+3. **`memstick-opfs-bridge` → `MEMFS` + Async `MessagePort` Sync to Worker B OPFS, NOT `vfs_save_write_sync`:**
+   - `vfs_save_write_sync` is unusable for PSP `/PSP/SAVEDATA/`: `VFS_ARENA_SAVE_MAX_BYTES` is capped at 124 KiB (`web/vfs_offsets.js`), filenames are flat 64-byte strings (`savesDir.getFileHandle(name)` rejects `/`), `WorkerBCore` (`externals/vfs-streamer`, immutable) does not `await onSaveWrite` before waking the futex, and `worker_b_core.mjs:670` decodes a SAB `subarray` without `.slice()`.
+   - Let PPSSPP write to Emscripten `MEMFS` and sync `/PSP/SAVEDATA/` to Worker B's OPFS `/saves/${gameId}/` over a dedicated async `MessagePort` protocol (hydrate on boot, debounced write-back on file close, awaited flush+ack on XMB menu exit and `visibilitychange`).
+4. **Spike Execution Order:**
+   - Run **Spike #2 (`root-hunter/ppsspp-wasm @ 4d0564b`) first** to confirm `6.0.12` vs `7.0.0` compilation and inspect its actual main loop, GL thread, and `BlockDevice` integration seam before executing downstream spikes.
