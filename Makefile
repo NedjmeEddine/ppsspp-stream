@@ -55,7 +55,10 @@ server:
 	go build -o bin/ppsspp-server ./cmd/ppsspp-server
 	cd externals/vfs-streamer && go build -o ../../bin/markov-pack ./cmd/markov-pack
 
+ppsspp-core:
+	./scripts/build_ppsspp_core.sh
+
 clean:
 	rm -rf $(BUILD_DIR) libppsspp_vfs.a block_device_test src/disc_io/*.o *.o
 
-.PHONY: all clean test wasm server
+.PHONY: all clean test wasm server ppsspp-core

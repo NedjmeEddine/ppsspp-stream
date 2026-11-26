@@ -13,9 +13,32 @@ This document tracks how the upstream PPSSPP emulator core integrates with `ppss
   * **Worker Model:** Under Emscripten 6.0.12, pthreads bootstrap directly from `PPSSPPSDL.js` (no separate `PPSSPPSDL.worker.js` file is emitted).
   * **Required Submodules:** `assets/debugger`, `ext/SPIRV-Cross`, `ext/aemu_postoffice`, `ext/armips` (+ `ext/filesystem`), `ext/cpu_features`, `ext/freetype`, `ext/glslang`, `ext/libchdr`, `ext/lua`, `ext/miniupnp`, `ext/naett`, `ext/nanosvg`, `ext/rapidjson`, `ext/rcheevos`, `ext/zstd`, `ext/OpenXR-SDK` (`ffmpeg`, `pspautotests`, `MoltenVK`, `OpenXR-SDK` optional build disabled via `-DUSE_FFMPEG=OFF`).
   * **Build Flags:**
-    `-G Ninja -DCMAKE_BUILD_TYPE=Release -DUSING_GLES2=ON -DUSING_EGL=OFF -DVULKAN=OFF -DUSE_NO_MMAP=ON -DUSE_FFMPEG=OFF -DUSE_DISCORD=OFF -DUSE_MINIUPNPC=OFF -DUSE_SYSTEM_LIBSDL2=OFF -DUSE_SYSTEM_LIBPNG=OFF -DUSE_SYSTEM_FREETYPE=OFF -DUSE_SYSTEM_LIBZIP=OFF -DWASM_MAIN_LOOP_FPS=60 -DWASM_INITIAL_MEMORY=536870912 -DWASM_MAXIMUM_MEMORY=536870912 -DWASM_MAX_PERF=ON -DWASM_ENABLE_LTO=OFF -DWASM_MALLOC=emmalloc`
-    with patched link options: `-sALLOW_MEMORY_GROWTH=0`, `-sPTHREAD_POOL_SIZE=8`, `-sPTHREAD_POOL_SIZE_STRICT=2`, `-sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createPpssppModule`.
+    `-G Ninja -DCMAKE_BUILD_TYPE=Release -DUSING_GLES2=ON -DUSING_EGL=OFF -DVULKAN=OFF -DUSE_NO_MMAP=ON -DUSE_FFMPEG=OFF -DUSE_DISCORD=OFF -DUSE_MINIUPNPC=OFF -DUSE_SYSTEM_LIBSDL2=OFF -DUSE_SYSTEM_LIBPNG=OFF -DUSE_SYSTEM_FREETYPE=OFF -DUSE_SYSTEM_LIBZIP=OFF -DWASM_MAIN_LOOP_FPS=60 -DWASM_INITIAL_MEMORY=536870912 -DWASM_MAXIMUM_MEMORY=536870912 -DWASM_MAX_PERF=ON -DWASM_ENABLE_LTO=OFF -DWASM_MALLOC=emmalloc -DPPSSPP_STREAM_INTEGRATION=ON`
+    with patched link options: `-sALLOW_MEMORY_GROWTH=0`, `-sPTHREAD_POOL_SIZE=12`, `-sPTHREAD_POOL_SIZE_STRICT=2`, `-sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createPpssppModule`.
   * **Rule:** Record the exact pinned commit SHA and `emcmake cmake` flags here before committing any compiled `cores/ppsspp/` artifacts.
+
+### `VfsIpcMailbox` Shared-Memory ABI (In-WASM 64-byte Header + 512 KiB Payload)
+
+`WasmVfsFileLoader.cpp` allocates an `alignas(64)` static `VfsIpcMailbox` inside PPSSPP's fixed 512 MiB `SharedArrayBuffer` (`HEAPU8.buffer`), serialized across PPSSPP pthreads via `static std::mutex g_vfs_ipc_mutex`:
+
+| Byte Offset | Type | Field | Description |
+| :--- | :--- | :--- | :--- |
+| `0` | `int32_t` | `req_futex` | Incremented + woken by PPSSPP pthread (and abort) to wake Worker A |
+| `4` | `int32_t` | `resp_futex` | Incremented + woken by Worker A (and abort) to wake PPSSPP pthread |
+| `8` | `int32_t` | `op` | `0=IDLE`, `1=READ` |
+| `12` | `int32_t` | `status` | `0=PENDING`, `1=OK`, `-1=ERR_EOF_IO`, `-2=ERR_BUILD_ROTATED`, `-3=ERR_ABORTED` |
+| `16` | `int32_t` | `abort_flag` | Set to `1` before incrementing & waking `resp_futex`/`req_futex` on shutdown |
+| `20` | `uint32_t` | `len` | Read length in bytes (`1..524288`) |
+| `24` | `uint64_t` | `offset` | Unsigned 64-bit byte offset into UMD disc |
+| `32` | `uint64_t` | `disc_size` | Pre-populated disc byte size (read lock-free on main thread `Exists()`/`FileSize()`) |
+| `64..524351` | `uint8_t[524288]` | `payload` | 512 KiB read transfer buffer |
+
+### Exported C ABI (`cores/ppsspp/PPSSPPSDL.js`)
+
+* `_ppsspp_stream_get_ipc_ptr()` -> returns 64-byte-aligned `uintptr_t` of `VfsIpcMailbox` inside `Module.HEAPU8.buffer`.
+* `_ppsspp_stream_set_disc_size(uint64_t size)` -> initializes mailbox state and stores `disc_size`.
+* `_ppsspp_stream_request_shutdown()` -> sets `g_QuitRequested = true`, aborts IPC futexes (`abort_flag = 1`, `resp_futex.fetch_add(1)`, `req_futex.fetch_add(1)`), and requests non-blocking `EmuThreadStop`.
+* `_ppsspp_stream_get_frame_count()` -> returns monotonically increasing rendered WebGL2 frame count.
 
 ---
 

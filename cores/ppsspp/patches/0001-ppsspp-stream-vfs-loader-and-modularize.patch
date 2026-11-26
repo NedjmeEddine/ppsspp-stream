@@ -1,0 +1,462 @@
+diff --git i/CMakeLists.txt w/CMakeLists.txt
+index 05ec434..cc836c8 100644
+--- i/CMakeLists.txt
++++ w/CMakeLists.txt
+@@ -320,8 +320,16 @@ include_directories(ext/glslang)
+ include_directories(ext/glew)
+ 
+ if(EMSCRIPTEN)
++	option(PPSSPP_STREAM_INTEGRATION "Enable PPSSPP-Stream VFS IPC and modularized WASM host exports" OFF)
+ 	option(WASM_ADHOC_TESTS "Export the protocol-level socket integration probe" OFF)
+ 	option(WASM_THREADED_ADHOC "Run WLAN emulation on a pthread while the browser renders and receives packets" ON)
++	if(PPSSPP_STREAM_INTEGRATION)
++		set_property(SOURCE
++			Core/Loaders.cpp
++			Core/FileLoaders/WasmVfsFileLoader.cpp
++			SDL/SDLMain.cpp
++			APPEND PROPERTY COMPILE_DEFINITIONS PPSSPP_STREAM_INTEGRATION=1)
++	endif()
+ 	if(WASM_THREADED_ADHOC)
+ 		set_property(SOURCE SDL/SDLMain.cpp APPEND PROPERTY COMPILE_DEFINITIONS PPSSPP_WASM_THREADED_ADHOC=1)
+ 	endif()
+@@ -329,7 +337,11 @@ if(EMSCRIPTEN)
+ 		add_link_options("-sEXPORTED_FUNCTIONS=_main,_ppssppNetProbe,_ppssppNetProbeByte")
+ 	endif()
+ 	add_link_options("-sFETCH=1")
+-	add_link_options("-sEXPORTED_RUNTIME_METHODS=FS,SOCKFS,ccall,cwrap")
++	if(PPSSPP_STREAM_INTEGRATION)
++		add_link_options("-sEXPORTED_RUNTIME_METHODS=FS,SOCKFS,ccall,cwrap,callMain,HEAPU8,PThread")
++	else()
++		add_link_options("-sEXPORTED_RUNTIME_METHODS=FS,SOCKFS,ccall,cwrap")
++	endif()
+ 	option(WASM_MAX_PERF "Enable aggressive WebAssembly release optimizations" ON)
+ 	option(WASM_ENABLE_LTO "Enable WebAssembly link-time optimization in release builds" OFF)
+ 	option(WASM_PRELOAD_ASSETS "Package PPSSPP assets into the Emscripten preload data file" ON)
+@@ -349,13 +361,21 @@ if(EMSCRIPTEN)
+ 	add_link_options(-msimd128)
+ 	add_link_options(-pthread)
+ 	add_link_options(-fexceptions)
+-	add_link_options("-sALLOW_MEMORY_GROWTH=1" "-sINITIAL_MEMORY=${WASM_INITIAL_MEMORY}" "-sMAXIMUM_MEMORY=${WASM_MAXIMUM_MEMORY}")
++	if(PPSSPP_STREAM_INTEGRATION)
++		add_link_options("-sALLOW_MEMORY_GROWTH=0" "-sINITIAL_MEMORY=${WASM_INITIAL_MEMORY}" "-sMAXIMUM_MEMORY=${WASM_MAXIMUM_MEMORY}")
++		add_link_options("-sPTHREAD_POOL_SIZE=12" "-sPTHREAD_POOL_SIZE_STRICT=2")
++		add_link_options("-sMODULARIZE=1" "-sEXPORT_ES6=1" "-sEXPORT_NAME=createPpssppModule")
++		add_link_options("-sINCOMING_MODULE_JS_API=canvas,locateFile,print,printErr,setStatus,monitorRunDependencies,preRun,onRuntimeInitialized,onAbort,arguments,noInitialRun")
++		add_link_options("-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_ppsspp_stream_get_ipc_ptr,_ppsspp_stream_set_disc_size,_ppsspp_stream_request_shutdown,_ppsspp_stream_get_frame_count")
++	else()
++		add_link_options("-sALLOW_MEMORY_GROWTH=1" "-sINITIAL_MEMORY=${WASM_INITIAL_MEMORY}" "-sMAXIMUM_MEMORY=${WASM_MAXIMUM_MEMORY}")
++		add_link_options("-sPTHREAD_POOL_SIZE=Math.max(4,navigator.hardwareConcurrency||4)")
++		add_link_options("-sINCOMING_MODULE_JS_API=canvas,locateFile,print,printErr,setStatus,monitorRunDependencies,preRun,onRuntimeInitialized,onAbort,arguments,SDL2")
++	endif()
+ 	add_link_options("-sFULL_ES3=1")
+ 	add_link_options("-sGL_ENABLE_GET_PROC_ADDRESS=1")
+ 	add_link_options("-sGL_SUPPORT_AUTOMATIC_ENABLE_EXTENSIONS=1")
+ 	add_link_options("-sWASM_BIGINT=1")
+-	add_link_options("-sPTHREAD_POOL_SIZE=Math.max(4,navigator.hardwareConcurrency||4)")
+-	add_link_options("-sINCOMING_MODULE_JS_API=canvas,locateFile,print,printErr,setStatus,monitorRunDependencies,preRun,onRuntimeInitialized,onAbort,arguments,SDL2")
+ 	add_link_options("-lworkerfs.js")
+ 	if(WASM_PRELOAD_ASSETS)
+ 		add_link_options("--preload-file" "${CMAKE_SOURCE_DIR}/assets@${CMAKE_INSTALL_FULL_DATADIR}/ppsspp/assets")
+@@ -2575,6 +2595,8 @@ add_library(${CoreLibName} ${CoreLinkType}
+ 	Core/FileLoaders/RetryingFileLoader.h
+ 	Core/FileLoaders/ZipFileLoader.cpp
+ 	Core/FileLoaders/ZipFileLoader.h
++	Core/FileLoaders/WasmVfsFileLoader.cpp
++	Core/FileLoaders/WasmVfsFileLoader.h
+ 	Core/MIPS/MIPS.cpp
+ 	Core/MIPS/MIPS.h
+ 	Core/MIPS/MIPSAnalyst.cpp
+diff --git i/Core/FileLoaders/WasmVfsFileLoader.cpp w/Core/FileLoaders/WasmVfsFileLoader.cpp
+new file mode 100644
+index 0000000..f89a624
+--- /dev/null
++++ w/Core/FileLoaders/WasmVfsFileLoader.cpp
+@@ -0,0 +1,153 @@
++// Copyright (c) 2012- PPSSPP Project / PPSSPP-Stream Contributors.
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, version 2.0 or later versions.
++
++#include "Core/FileLoaders/WasmVfsFileLoader.h"
++
++#include <algorithm>
++#include <climits>
++#include <cstring>
++#include <mutex>
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten/emscripten.h>
++#include <emscripten/threading.h>
++#endif
++
++namespace {
++
++constexpr size_t VFS_IPC_MAX_READ_BYTES = 524288; // 512 KiB
++
++struct alignas(64) VfsIpcMailbox {
++	std::atomic<int32_t> req_futex{0};                 // offset 0
++	std::atomic<int32_t> resp_futex{0};                // offset 4
++	std::atomic<int32_t> op{0};                        // offset 8  (0=IDLE, 1=READ)
++	std::atomic<int32_t> status{0};                    // offset 12 (0=PENDING, 1=OK, -1=ERR_EOF_IO, -2=ERR_BUILD_ROTATED, -3=ERR_ABORTED)
++	std::atomic<int32_t> abort_flag{0};                // offset 16
++	std::atomic<uint32_t> len{0};                      // offset 20
++	std::atomic<uint64_t> offset{0};                   // offset 24
++	std::atomic<uint64_t> disc_size{0};                // offset 32
++	uint8_t padding[24]{};                             // offset 40..63
++	uint8_t payload[VFS_IPC_MAX_READ_BYTES]{};         // offset 64..524351
++};
++
++static_assert(sizeof(VfsIpcMailbox) == 64 + VFS_IPC_MAX_READ_BYTES, "VfsIpcMailbox size mismatch");
++
++alignas(64) VfsIpcMailbox g_ipc_mailbox;
++std::mutex g_vfs_ipc_mutex;
++
++} // namespace
++
++WasmVfsFileLoader::WasmVfsFileLoader(const Path &filename) : filename_(filename) {}
++
++bool WasmVfsFileLoader::Exists() {
++	return g_ipc_mailbox.disc_size.load(std::memory_order_acquire) > 0;
++}
++
++s64 WasmVfsFileLoader::FileSize() {
++	return static_cast<s64>(g_ipc_mailbox.disc_size.load(std::memory_order_acquire));
++}
++
++size_t WasmVfsFileLoader::ReadAt(s64 absolutePos, size_t bytes, size_t count, void *data, Flags /*flags*/) {
++#ifdef __EMSCRIPTEN__
++	if (emscripten_is_main_runtime_thread()) {
++		return 0;
++	}
++#endif
++	if (absolutePos < 0 || bytes == 0 || count == 0 || !data) {
++		return 0;
++	}
++	if (count > SIZE_MAX / bytes) {
++		return 0;
++	}
++	const size_t requestedTotal = bytes * count;
++	const uint64_t discSize = g_ipc_mailbox.disc_size.load(std::memory_order_acquire);
++	const uint64_t startOffset = static_cast<uint64_t>(absolutePos);
++	if (startOffset >= discSize) {
++		return 0;
++	}
++	const uint64_t remaining = discSize - startOffset;
++	const size_t totalBytes = (requestedTotal > remaining)
++		? static_cast<size_t>((remaining / bytes) * bytes)
++		: requestedTotal;
++	if (totalBytes == 0) {
++		return 0;
++	}
++
++	std::lock_guard<std::mutex> lock(g_vfs_ipc_mutex);
++
++	size_t done = 0;
++	auto *dst = static_cast<uint8_t *>(data);
++	while (done < totalBytes) {
++		if (g_ipc_mailbox.abort_flag.load(std::memory_order_acquire) != 0 ||
++		    cancelled_.load(std::memory_order_acquire)) {
++			return 0;
++		}
++		const size_t chunk = std::min(totalBytes - done, VFS_IPC_MAX_READ_BYTES);
++		const int32_t expectedSeq = g_ipc_mailbox.resp_futex.load(std::memory_order_acquire);
++
++		g_ipc_mailbox.offset.store(startOffset + done, std::memory_order_relaxed);
++		g_ipc_mailbox.len.store(static_cast<uint32_t>(chunk), std::memory_order_relaxed);
++		g_ipc_mailbox.status.store(0, std::memory_order_relaxed);
++		g_ipc_mailbox.op.store(1, std::memory_order_release);
++		g_ipc_mailbox.req_futex.fetch_add(1, std::memory_order_acq_rel);
++#ifdef __EMSCRIPTEN__
++		emscripten_futex_wake((volatile void *)&g_ipc_mailbox.req_futex, 1);
++
++		while (true) {
++			const int32_t seq = g_ipc_mailbox.resp_futex.load(std::memory_order_acquire);
++			if (g_ipc_mailbox.abort_flag.load(std::memory_order_acquire) != 0 ||
++			    cancelled_.load(std::memory_order_acquire)) {
++				return 0;
++			}
++			if (seq != expectedSeq && g_ipc_mailbox.op.load(std::memory_order_acquire) == 0) {
++				break;
++			}
++			emscripten_futex_wait((volatile void *)&g_ipc_mailbox.resp_futex, static_cast<uint32_t>(seq), 100.0);
++		}
++#else
++		return 0;
++#endif
++		const int32_t st = g_ipc_mailbox.status.load(std::memory_order_acquire);
++		if (st != 1) {
++			return 0;
++		}
++		std::memcpy(dst + done, g_ipc_mailbox.payload, chunk);
++		done += chunk;
++	}
++
++	return done / bytes;
++}
++
++extern "C" {
++
++#ifdef __EMSCRIPTEN__
++EMSCRIPTEN_KEEPALIVE
++#endif
++uintptr_t ppsspp_stream_get_ipc_ptr() {
++	return reinterpret_cast<uintptr_t>(&g_ipc_mailbox);
++}
++
++#ifdef __EMSCRIPTEN__
++EMSCRIPTEN_KEEPALIVE
++#endif
++void ppsspp_stream_set_disc_size(uint64_t size) {
++	g_ipc_mailbox.abort_flag.store(0, std::memory_order_release);
++	g_ipc_mailbox.op.store(0, std::memory_order_release);
++	g_ipc_mailbox.status.store(0, std::memory_order_release);
++	g_ipc_mailbox.disc_size.store(size, std::memory_order_release);
++}
++
++void ppsspp_stream_abort_ipc() {
++	g_ipc_mailbox.abort_flag.store(1, std::memory_order_release);
++	g_ipc_mailbox.status.store(-3, std::memory_order_release);
++	g_ipc_mailbox.resp_futex.fetch_add(1, std::memory_order_acq_rel);
++	g_ipc_mailbox.req_futex.fetch_add(1, std::memory_order_acq_rel);
++#ifdef __EMSCRIPTEN__
++	emscripten_futex_wake((volatile void *)&g_ipc_mailbox.resp_futex, INT32_MAX);
++	emscripten_futex_wake((volatile void *)&g_ipc_mailbox.req_futex, INT32_MAX);
++#endif
++}
++
++} // extern "C"
+diff --git i/Core/FileLoaders/WasmVfsFileLoader.h w/Core/FileLoaders/WasmVfsFileLoader.h
+new file mode 100644
+index 0000000..9628f08
+--- /dev/null
++++ w/Core/FileLoaders/WasmVfsFileLoader.h
+@@ -0,0 +1,43 @@
++// Copyright (c) 2012- PPSSPP Project / PPSSPP-Stream Contributors.
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, version 2.0 or later versions.
++
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++
++#include "Common/CommonTypes.h"
++#include "Common/File/Path.h"
++#include "Core/Loaders.h"
++
++class WasmVfsFileLoader : public FileLoader {
++public:
++	explicit WasmVfsFileLoader(const Path &filename);
++	~WasmVfsFileLoader() override = default;
++
++	bool Exists() override;
++	bool ExistsFast() override { return Exists(); }
++	bool IsDirectory() override { return false; }
++	s64 FileSize() override;
++	Path GetPath() const override { return filename_; }
++	size_t ReadAt(s64 absolutePos, size_t bytes, size_t count, void *data, Flags flags = Flags::NONE) override;
++	void Cancel() override { cancelled_.store(true, std::memory_order_release); }
++
++private:
++	Path filename_;
++	std::atomic<bool> cancelled_{false};
++};
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++uintptr_t ppsspp_stream_get_ipc_ptr();
++void ppsspp_stream_set_disc_size(uint64_t size);
++void ppsspp_stream_abort_ipc();
++
++#ifdef __cplusplus
++}
++#endif
+diff --git i/Core/Loaders.cpp w/Core/Loaders.cpp
+index a17ce1e..5c5c3ef 100644
+--- i/Core/Loaders.cpp
++++ w/Core/Loaders.cpp
+@@ -27,6 +27,9 @@
+ #include "Core/FileLoaders/LocalFileLoader.h"
+ #include "Core/FileLoaders/RetryingFileLoader.h"
+ #include "Core/FileLoaders/ZipFileLoader.h"
++#if defined(__EMSCRIPTEN__) && defined(PPSSPP_STREAM_INTEGRATION)
++#include "Core/FileLoaders/WasmVfsFileLoader.h"
++#endif
+ #include "Core/FileSystems/MetaFileSystem.h"
+ #include "Core/FileSystems/BlockDevices.h"
+ #include "Core/FileSystems/ISOFileSystem.h"
+@@ -51,6 +54,11 @@ struct PVD {
+ };
+ 
+ FileLoader *ConstructFileLoader(const Path &filename) {
++#if defined(__EMSCRIPTEN__) && defined(PPSSPP_STREAM_INTEGRATION)
++	if (startsWith(filename.ToString(), "/vfs/")) {
++		return new WasmVfsFileLoader(filename);
++	}
++#endif
+ 	if (filename.Type() == PathType::HTTP) {
+ 		FileLoader *baseLoader = new RetryingFileLoader(new HTTPFileLoader(filename));
+ 		// For headless, avoid disk caching since it's usually used for tests that might mutate.
+diff --git i/SDL/SDLMain.cpp w/SDL/SDLMain.cpp
+index 9c5e54d..a3909a9 100644
+--- i/SDL/SDLMain.cpp
++++ w/SDL/SDLMain.cpp
+@@ -81,6 +81,10 @@ SDLJoystick *joystick = NULL;
+ #include "Core/Config.h"
+ #include "Core/CoreTiming.h"
+ #include "Core/ConfigValues.h"
++#if defined(__EMSCRIPTEN__) && defined(PPSSPP_STREAM_INTEGRATION)
++#include "Core/FileLoaders/WasmVfsFileLoader.h"
++#include <climits>
++#endif
+ #include "SDLGLGraphicsContext.h"
+ #if defined(PPSSPP_SDL_HAS_VULKAN)
+ #include "SDLVulkanGraphicsContext.h"
+@@ -1007,6 +1011,11 @@ enum class EmuThreadState {
+ 
+ static std::thread emuThread;
+ static std::atomic<int> emuThreadState((int)EmuThreadState::DISABLED);
++#if defined(__EMSCRIPTEN__) && defined(PPSSPP_STREAM_INTEGRATION)
++static std::atomic<int> g_emuThreadFinished{0};
++static std::atomic<int> g_renderedFrames{0};
++static std::atomic<bool> g_shutdownCleanupDone{false};
++#endif
+ 
+ static void EmuThreadFunc(GraphicsContext *graphicsContext) {
+ 	SetCurrentThreadName("EmuThread");
+@@ -1037,10 +1046,19 @@ static void EmuThreadFunc(GraphicsContext *graphicsContext) {
+ 	WASM_TRACE("EmuThread NativeShutdownGraphics begin");
+ 	NativeShutdownGraphics();
+ 	WASM_TRACE("EmuThread NativeShutdownGraphics done");
++#if defined(__EMSCRIPTEN__) && defined(PPSSPP_STREAM_INTEGRATION)
++	g_emuThreadFinished.store(1, std::memory_order_release);
++#endif
+ }
+ 
+ static void EmuThreadStart(GraphicsContext *context) {
+ #ifdef __EMSCRIPTEN__
++#if defined(PPSSPP_STREAM_INTEGRATION)
++	g_emuThreadFinished.store(0, std::memory_order_release);
++	emuThreadState = (int)EmuThreadState::START_REQUESTED;
++	emuThread = std::thread(&EmuThreadFunc, context);
++	return;
++#endif
+ #ifdef PPSSPP_WASM_THREADED_ADHOC
+ 	// Render queue draining stays nonblocking on the browser thread. Only
+ 	// the emulation worker waits for GL fences, leaving WebSocket delivery free.
+@@ -1659,6 +1677,20 @@ extern "C" EMSCRIPTEN_KEEPALIVE void PPSSPP_ToggleFullscreen() {
+ 	System_ApplyFullscreenState();
+ }
+ 
++#if defined(PPSSPP_STREAM_INTEGRATION)
++extern "C" {
++EMSCRIPTEN_KEEPALIVE void ppsspp_stream_request_shutdown() {
++	g_QuitRequested = true;
++	ppsspp_stream_abort_ipc();
++	EmuThreadStop("shutdown");
++}
++
++EMSCRIPTEN_KEEPALIVE int ppsspp_stream_get_frame_count() {
++	return g_renderedFrames.load(std::memory_order_acquire);
++}
++}
++#endif
++
+ static void UpdateEmscriptenMainLoopTiming() {
+ #if PPSSPP_WASM_MAIN_LOOP_FPS >= 0
+ 	const int fps = EmscriptenMainLoopFPS();
+@@ -1725,6 +1757,36 @@ static void EmscriptenMainLoop(void *arg) {
+ 
+ 	UpdateEmscriptenMainLoopTiming();
+ 
++#if defined(PPSSPP_STREAM_INTEGRATION)
++	if (g_QuitRequested || g_RestartRequested) {
++		if (g_shutdownCleanupDone.load(std::memory_order_acquire)) {
++			emscripten_cancel_main_loop();
++			return;
++		}
++		if (emuThreadState != (int)EmuThreadState::DISABLED && g_emuThreadFinished.load(std::memory_order_acquire) == 0) {
++			EmuThreadStop("shutdown");
++			for (int i = 0; i < 8 && graphicsContext->ThreadFrameAvailable(); ++i) {}
++			return;
++		}
++		g_shutdownCleanupDone.store(true, std::memory_order_release);
++		for (int i = 0; i < 8 && graphicsContext->ThreadFrameAvailable(); ++i) {}
++		EmuThreadJoin();
++		delete joystick;
++		joystick = nullptr;
++		graphicsContext->ThreadEnd();
++		NativeShutdown();
++		graphicsContext->ShutdownFromRenderThread();
++		graphicsContext->Shutdown();
++		delete graphicsContext;
++		state->graphicsContext = nullptr;
++		glslang::FinalizeProcess();
++		SDL_Quit();
++		emscripten_cancel_main_loop();
++		EM_ASM({ if (Module.onShutdownComplete) Module.onShutdownComplete(); });
++		return;
++	}
++#endif
++
+ 	{
+ 		SDL_Event event;
+ 		while (SDL_PollEvent(&event)) {
+@@ -1732,15 +1794,25 @@ static void EmscriptenMainLoop(void *arg) {
+ 		}
+ 	}
+ 	if (g_QuitRequested || g_RestartRequested) {
++#if defined(PPSSPP_STREAM_INTEGRATION)
++		ppsspp_stream_request_shutdown();
++		return;
++#else
+ 		emscripten_cancel_main_loop();
+ 		return;
++#endif
+ 	}
+ 	if (emuThreadState == (int)EmuThreadState::DISABLED && EmscriptenNetworkFrameDue()) {
+ 		NativeFrame(graphicsContext);
+ 	}
+ 	if (g_QuitRequested || g_RestartRequested) {
++#if defined(PPSSPP_STREAM_INTEGRATION)
++		ppsspp_stream_request_shutdown();
++		return;
++#else
+ 		emscripten_cancel_main_loop();
+ 		return;
++#endif
+ 	}
+ 
+ 	UpdateTextFocus();
+@@ -1751,7 +1823,13 @@ static void EmscriptenMainLoop(void *arg) {
+ 	// Process the GL render queue: both for the DISABLED path (main thread
+ 	// ran NativeFrame above and pushed tasks) and for the threaded path
+ 	// (emu worker pushed tasks asynchronously).
+-	graphicsContext->ThreadFrameAvailable();
++	if (graphicsContext->ThreadFrameAvailable()) {
++#if defined(PPSSPP_STREAM_INTEGRATION)
++		if (g_renderedFrames.fetch_add(1, std::memory_order_acq_rel) == 0) {
++			EM_ASM({ if (Module.onFirstFrame) Module.onFirstFrame(); });
++		}
++#endif
++	}
+ 
+ 	{
+ 		std::lock_guard<std::mutex> guard(g_mutexWindow);
+@@ -1798,6 +1876,13 @@ static void EmscriptenMainLoop(void *arg) {
+ #endif
+ int main(int argc, char *argv[]) {
+ 	WASM_TRACE("main entered argc=%d", argc);
++#if defined(__EMSCRIPTEN__) && defined(PPSSPP_STREAM_INTEGRATION)
++	g_QuitRequested = false;
++	g_RestartRequested = false;
++	g_emuThreadFinished.store(0, std::memory_order_release);
++	g_renderedFrames.store(0, std::memory_order_release);
++	g_shutdownCleanupDone.store(false, std::memory_order_release);
++#endif
+ 	for (int i = 1; i < argc; i++) {
+ 		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h"))
+ 			return printUsage(argv[0]);

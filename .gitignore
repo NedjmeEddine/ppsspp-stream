@@ -7,6 +7,10 @@ block_device_test
 *.so
 *.wasm
 !web/vfs.wasm
+cores/ppsspp/PPSSPPSDL.js
+cores/ppsspp/PPSSPPSDL.wasm
+cores/ppsspp/PPSSPPSDL.data
+cores/ppsspp/PPSSPPSDL.worker.js
 
 # Node & dependencies
 node_modules
