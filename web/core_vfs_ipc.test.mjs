@@ -2,9 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import http from 'node:http';
 import { execFileSync } from 'node:child_process';
-import { startStaticServer, launchBrowser, rootDir, webDir } from './test_helper.mjs';
+import { startStaticServer, launchBrowser, rootDir } from './test_helper.mjs';
 
 const CORE_DIR = path.join(rootDir, 'cores', 'ppsspp');
 const PATCH_0001 = path.join(CORE_DIR, 'patches', '0001-ppsspp-stream-vfs-loader-and-modularize.patch');
@@ -238,61 +237,15 @@ test('AC-1.2 & AC-1.3: Real PPSSPPSDL WASM Core Boots /vfs/game.iso via WasmVfsF
         execFileSync(process.execPath, [path.join(rootDir, 'scripts', 'gen_mock_psp.mjs')], { stdio: 'inherit' });
     }
 
-    // Custom HTTP server wrapping pack + rootDir so we can count Range bytes transferred on /packs/
     let packBytesTransferred = 0;
-    const MIME = {
-        '.html': 'text/html',
-        '.js': 'application/javascript',
-        '.mjs': 'application/javascript',
-        '.css': 'text/css',
-        '.wasm': 'application/wasm',
-        '.data': 'application/octet-stream'
-    };
-    const server = http.createServer((req, res) => {
-        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-        res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
-        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-
-        let reqPath = req.url.split('?')[0];
-        let filePath;
-        if (reqPath === '/manifest.bin' || reqPath.startsWith('/packs/')) {
-            filePath = path.join(gowPackDir, path.basename(reqPath));
-        } else if (reqPath.startsWith('/cores/')) {
-            filePath = path.join(rootDir, reqPath);
-        } else {
-            if (reqPath === '/') reqPath = '/index.html';
-            filePath = path.join(webDir, reqPath);
-        }
-
-        if (!fs.existsSync(filePath)) {
-            res.statusCode = 404;
-            res.end('Not Found');
-            return;
-        }
-        res.setHeader('Content-Type', MIME[path.extname(filePath)] || 'application/octet-stream');
-
-        const rangeHeader = req.headers.range;
-        if (rangeHeader) {
-            const stat = fs.statSync(filePath);
-            const m = rangeHeader.match(/bytes=(\d+)-(\d+)/);
-            if (m) {
-                const start = parseInt(m[1], 10);
-                const end = parseInt(m[2], 10);
-                if (reqPath.startsWith('/packs/')) {
-                    packBytesTransferred += (end - start + 1);
-                }
-                res.statusCode = 206;
-                res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
-                res.setHeader('Content-Length', end - start + 1);
-                fs.createReadStream(filePath, { start, end }).pipe(res);
-                return;
+    const { server, url } = await startStaticServer({
+        packDir: gowPackDir,
+        onRangeBytes: (reqPath, bytes) => {
+            if (reqPath.startsWith('/packs/')) {
+                packBytesTransferred += bytes;
             }
-        }
-        fs.createReadStream(filePath).pipe(res);
+        },
     });
-    await new Promise((r) => server.listen(0, '127.0.0.1', r));
-    const url = `http://127.0.0.1:${server.address().port}/`;
     const browser = await launchBrowser();
 
     try {

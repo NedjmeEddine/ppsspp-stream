@@ -21,7 +21,7 @@ const MIME_TYPES = {
     '.data': 'application/octet-stream'
 };
 
-export async function startStaticServer({ packDir = null } = {}) {
+export async function startStaticServer({ packDir = null, onRangeBytes = null } = {}) {
     const server = http.createServer((req, res) => {
         res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
         res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
@@ -55,6 +55,9 @@ export async function startStaticServer({ packDir = null } = {}) {
             if (matches) {
                 const start = parseInt(matches[1], 10);
                 const end = parseInt(matches[2], 10);
+                if (typeof onRangeBytes === 'function') {
+                    onRangeBytes(reqPath, end - start + 1);
+                }
                 res.statusCode = 206;
                 res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
                 res.setHeader('Content-Length', end - start + 1);
@@ -92,6 +95,7 @@ export async function startPpssppServer() {
     const proc = spawn(path.join(rootDir, 'bin', 'ppsspp-server'), [
         '-data-dir', path.join(rootDir, 'dist'),
         '-web-dir', webDir,
+        '-cores-dir', path.join(rootDir, 'cores'),
         '-addr', addr
     ], { stdio: 'pipe' });
 

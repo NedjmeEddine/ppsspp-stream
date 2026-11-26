@@ -16,7 +16,7 @@ WASM_BUILD_TYPE="${WASM_BUILD_TYPE:-Release}"
 WASM_MAX_PERF="${WASM_MAX_PERF:-ON}"
 WASM_MAIN_LOOP_FPS="${WASM_MAIN_LOOP_FPS:-60}"
 WASM_JOBS="${WASM_JOBS:-3}"
-CMAKE_BIN="${CMAKE:-$(command -v cmake || echo /home/nedjmo/.local/bin/cmake)}"
+CMAKE_BIN="${CMAKE:-$(command -v cmake || echo "${HOME}/.local/bin/cmake")}"
 
 if ! command -v emcc >/dev/null 2>&1; then
     echo "ERROR: emcc not found on PATH. Run: source ~/.local/share/emsdk/emsdk_env.sh" >&2
