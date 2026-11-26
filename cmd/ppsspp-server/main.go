@@ -30,6 +30,7 @@ import (
 func init() {
 	_ = mime.AddExtensionType(".mjs", "text/javascript; charset=utf-8")
 	_ = mime.AddExtensionType(".wasm", "application/wasm")
+	_ = mime.AddExtensionType(".data", "application/octet-stream")
 }
 
 const (
@@ -130,6 +131,7 @@ type server struct {
 	dataDir        string
 	transitionsDir string
 	webHandler     http.Handler
+	coresHandler   http.Handler
 	maxLogBytes    int64
 	telemetryRPM   int
 	active         atomic.Pointer[rootSnapshot]
@@ -537,6 +539,10 @@ func (s *server) handler() http.Handler {
 			http.NotFound(w, r)
 		case clean == "/telemetry/transitions":
 			s.handleTelemetry(w, r)
+		case s.coresHandler != nil && strings.HasPrefix(clean, "/cores/"):
+			w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+			w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+			s.coresHandler.ServeHTTP(w, r)
 		case s.webHandler != nil:
 			w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 			w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
@@ -552,6 +558,7 @@ func main() {
 	dataDir := flag.String("data-dir", "./dist", "Directory containing games.json / manifest.bin")
 	transitionsDir := flag.String("transitions-dir", "./transitions", "Directory for transition logs")
 	webDir := flag.String("web-dir", "", "Optional static web root")
+	coresDir := flag.String("cores-dir", "./cores", "Directory containing compiled emulator cores")
 	maxLogBytes := flag.Int64("max-log-bytes", defaultMaxLogBytes, "Max bytes per transition log")
 	telemetryRPM := flag.Int("telemetry-rpm", defaultTelemetryRPM, "Per-IP telemetry rate limit")
 	flag.Parse()
@@ -565,6 +572,9 @@ func main() {
 	}
 	if *webDir != "" {
 		s.webHandler = http.FileServer(http.Dir(*webDir))
+	}
+	if *coresDir != "" {
+		s.coresHandler = http.StripPrefix("/cores/", http.FileServer(http.Dir(*coresDir)))
 	}
 	snap, err := s.loadSnapshot()
 	if err != nil {

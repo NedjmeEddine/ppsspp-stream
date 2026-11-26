@@ -209,7 +209,7 @@ test('AC-1.2 & AC-1.3: Worker A ATTACH_VFS_IPC Mailbox Protocol, Strict EOF, and
                 pvdMagic: String.fromCharCode(...readResults[0].sliceCopy.slice(1, 6)),
                 pvdSys: String.fromCharCode(...readResults[0].sliceCopy.slice(8, 16)),
                 crossBlockHead: String.fromCharCode(...readResults[1].sliceCopy.slice(0, 26)),
-                crossBlockTail: String.fromCharCode(...readResults[1].tailCopy.slice(0, 26)),
+                crossBlockTail: String.fromCharCode(...readResults[1].tailCopy.slice(0, 27)),
                 unalignedStr: String.fromCharCode(...readResults[2].sliceCopy.slice(0, 5)),
                 eofExactStatus: readResults[3].status,
                 eofStraddleStatus: readResults[4].status,

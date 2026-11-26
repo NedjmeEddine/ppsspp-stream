@@ -12,9 +12,88 @@ let scratchBufPtr = 0;
 let tocBufPtr = 0;
 let tocBufCap = 4 * 1024 * 1024;
 const FS_IPC_MAX_READ_BYTES = 4 * 1024 * 1024;
+const VFS_IPC_MAX_READ_BYTES = 524288;
 let pathBufPtr = 0;
 let outBufPtr = 0;
 let buildRotatedPosted = false;
+
+let ipcGeneration = 0;
+let ipcI32 = null;
+let ipcU32 = null;
+let ipcU64 = null;
+let ipcPayload = null;
+let ipcDoorbell = null;
+
+function stopVfsIpc() {
+    ipcGeneration++;
+    if (ipcDoorbell) {
+        ipcDoorbell.terminate();
+        ipcDoorbell = null;
+    }
+    ipcI32 = null;
+    ipcU32 = null;
+    ipcU64 = null;
+    ipcPayload = null;
+}
+
+function waitIpcReqAsync(sab, byteOffset, expected) {
+    if (typeof Atomics.waitAsync === 'function') {
+        const res = Atomics.waitAsync(ipcI32, 0, expected);
+        return res.async ? res.value : Promise.resolve(res.value);
+    }
+    if (!ipcDoorbell) {
+        ipcDoorbell = new Worker('./doorbell_worker.js');
+        ipcDoorbell.postMessage({
+            type: 'INIT',
+            wasmMemory: { buffer: sab },
+            missFutexIndex: byteOffset >>> 2
+        });
+    }
+    return new Promise((resolve) => {
+        const onMsg = (e) => {
+            if (e.data && e.data.type === 'WAKE') {
+                ipcDoorbell.removeEventListener('message', onMsg);
+                resolve(e.data.res);
+            }
+        };
+        ipcDoorbell.addEventListener('message', onMsg);
+        ipcDoorbell.postMessage({ type: 'WAIT', expected, timeoutMs: 250 });
+    });
+}
+
+async function runVfsIpcLoop(generation, sab, byteOffset) {
+    while (ipcGeneration === generation && ipcI32) {
+        if (Atomics.load(ipcI32, 4) !== 0) {
+            break;
+        }
+        const reqSeq = Atomics.load(ipcI32, 0);
+        const op = Atomics.load(ipcI32, 2);
+        if (op === 1) {
+            const offset = ipcU64[3];
+            const len = Atomics.load(ipcU32, 5);
+            let status = -1;
+            if (blockDevPtr && len > 0 && len <= VFS_IPC_MAX_READ_BYTES) {
+                const ok = wasmModule._vfs_block_read(blockDevPtr, offset, BigInt(len), scratchBufPtr);
+                if (ok === 1) {
+                    ipcPayload.set(new Uint8Array(wasmMemory.buffer, scratchBufPtr, len));
+                    status = 1;
+                } else if (wasmModule._vfs_read_sync) {
+                    const probe = Number(wasmModule._vfs_read_sync(ctxPtr, 0n, outBufPtr, 1));
+                    if (probe === -2) {
+                        postBuildRotated();
+                        status = -2;
+                    }
+                }
+            }
+            Atomics.store(ipcI32, 3, status);
+            Atomics.store(ipcI32, 2, 0);
+            Atomics.add(ipcI32, 1, 1);
+            Atomics.notify(ipcI32, 1, 1);
+            continue;
+        }
+        await waitIpcReqAsync(sab, byteOffset, reqSeq);
+    }
+}
 
 function postBuildRotated() {
     if (!buildRotatedPosted) {
@@ -39,6 +118,28 @@ self.onmessage = async (e) => {
             { type: `${type}_RES`, id: msg.id, ok: false, code: -1, error: 'WASM not initialized', buffer: tBuf },
             tBuf ? [tBuf] : []
         );
+        return;
+    }
+
+    if (type === 'ATTACH_VFS_IPC') {
+        const ipcSab = msg.ipcSab;
+        const byteOffset = Number(msg.byteOffset || 0);
+        if (!(ipcSab instanceof SharedArrayBuffer) ||
+            !Number.isSafeInteger(byteOffset) ||
+            byteOffset < 0 ||
+            (byteOffset % 64) !== 0 ||
+            byteOffset + 64 + VFS_IPC_MAX_READ_BYTES > ipcSab.byteLength) {
+            self.postMessage({ type: 'VFS_IPC_ATTACHED', id: msg.id, ok: false, error: 'invalid IPC SAB geometry' });
+            return;
+        }
+        stopVfsIpc();
+        const gen = ipcGeneration;
+        ipcI32 = new Int32Array(ipcSab, byteOffset, 16);
+        ipcU32 = new Uint32Array(ipcSab, byteOffset, 16);
+        ipcU64 = new BigUint64Array(ipcSab, byteOffset, 8);
+        ipcPayload = new Uint8Array(ipcSab, byteOffset + 64, VFS_IPC_MAX_READ_BYTES);
+        self.postMessage({ type: 'VFS_IPC_ATTACHED', id: msg.id, ok: true });
+        runVfsIpcLoop(gen, ipcSab, byteOffset);
         return;
     }
 

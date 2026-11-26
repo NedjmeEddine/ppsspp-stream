@@ -17,19 +17,24 @@ const MIME_TYPES = {
     '.js': 'application/javascript',
     '.mjs': 'application/javascript',
     '.css': 'text/css',
-    '.wasm': 'application/wasm'
+    '.wasm': 'application/wasm',
+    '.data': 'application/octet-stream'
 };
 
 export async function startStaticServer({ packDir = null } = {}) {
     const server = http.createServer((req, res) => {
         res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
         res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
         res.setHeader('Access-Control-Allow-Origin', '*');
 
         let reqPath = req.url.split('?')[0];
         let filePath;
         if (packDir && (reqPath === '/manifest.bin' || reqPath.startsWith('/packs/'))) {
             filePath = path.join(packDir, path.basename(reqPath));
+        } else if (reqPath.startsWith('/cores/')) {
+            const normalized = path.posix.normalize(reqPath);
+            filePath = normalized.startsWith('/cores/') ? path.join(rootDir, normalized) : '';
         } else {
             if (reqPath === '/') reqPath = '/index.html';
             filePath = path.join(webDir, reqPath);
