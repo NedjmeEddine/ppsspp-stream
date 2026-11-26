@@ -102,6 +102,7 @@
 
     <script type="module">
         import { createHudOverlay } from './hud_overlay.mjs';
+        import { createCoreHost } from './core_host.mjs';
 
         const grid = document.getElementById('game-grid');
         const badgeIso = document.getElementById('badge-iso');
@@ -117,6 +118,9 @@
 
         let workerA = null;
         let workerB = null;
+        let coreHost = null;
+        let exitPromise = null;
+        let launchGen = 0;
         let hud = null;
         let showHud = true;
         let latestSnapshot = null;
@@ -124,11 +128,22 @@
         let activePoolMb = 64;
 
         function resizeHud() {
-            hudCanvas.width = viewport.clientWidth || 960;
-            hudCanvas.height = (viewport.clientHeight - 48) || 540;
+            const rect = stage.getBoundingClientRect();
+            hudCanvas.width = Math.max(1, Math.round(rect.width || viewport.clientWidth || 960));
+            hudCanvas.height = Math.max(1, Math.round(rect.height || (viewport.clientHeight - 48) || 540));
             if (!hud) hud = createHudOverlay(hudCanvas);
+            if (hud && showHud && latestSnapshot) {
+                hud.render(latestSnapshot, {
+                    storageMode: opfsMode,
+                    gpuStatus: coreHost ? `WebGL2 (${coreHost.getFrameCount()}f)` : 'WebGL2 Target',
+                    vramLabel: `Unified Slab (${activePoolMb} MB)`
+                });
+            }
         }
         window.addEventListener('resize', resizeHud);
+        if (typeof ResizeObserver !== 'undefined') {
+            new ResizeObserver(resizeHud).observe(stage);
+        }
 
         function resetEmulatorCanvas() {
             const fresh = document.createElement('canvas');
@@ -150,11 +165,23 @@
             bannerEl.style.display = 'flex';
         }
 
-        function launchGame(game) {
+        async function launchGame(game) {
+            const myGen = ++launchGen;
+            if (exitPromise) {
+                await exitPromise;
+                if (myGen !== launchGen) return;
+            }
+            if (coreHost) {
+                await coreHost.shutdown();
+                coreHost = null;
+                window.__ppssppCoreHost = null;
+                if (myGen !== launchGen) return;
+            }
+
             viewport.style.display = 'flex';
             gameLabel.textContent = `${game.title} (PSP)`;
             resizeHud();
-            resetEmulatorCanvas();
+            const targetCanvas = resetEmulatorCanvas();
             drawBanner(game.title, '');
 
             if (workerA) { workerA.terminate(); workerA = null; }
@@ -166,6 +193,7 @@
 
             let nextId = 1;
             const pending = new Map();
+            let coreBootStarted = false;
             function callA(msg) {
                 return new Promise((resolve) => {
                     const id = nextId++;
@@ -189,6 +217,7 @@
             };
 
             workerB.onmessage = async (e) => {
+                if (myGen !== launchGen) return;
                 const { type, snapshot, opfsMode: mode, effectivePoolMB, reason } = e.data || {};
                 if (type === 'STATUS') {
                     if (mode) opfsMode = mode;
@@ -196,22 +225,57 @@
                     badgeStream.textContent = `${activePoolMb} MB RAM Pool (${opfsMode})`;
                     workerB.postMessage({ type: 'ENABLE_HUD', enabled: true });
 
+                    if (coreBootStarted) return;
+                    coreBootStarted = true;
+
                     const openRes = await callA({ type: 'DISC_OPEN', path: 'game.iso' });
-                    if (openRes.ok) {
-                        const idRes = await callA({ type: 'DISC_IDENTIFY' });
-                        badgeIso.textContent = idRes.ok ? `UMD Ready (${idRes.discId})` : 'Raw Stream Ready';
-                        badgeIso.className = 'badge ok';
-                        drawBanner(idRes.title || game.title, idRes.discId || '');
-                    } else {
+                    if (myGen !== launchGen) return;
+                    if (!openRes.ok) {
                         badgeIso.textContent = 'Disc Open Failed';
                         badgeIso.className = 'badge warn';
+                        return;
+                    }
+
+                    const idRes = await callA({ type: 'DISC_IDENTIFY' });
+                    if (myGen !== launchGen) return;
+                    badgeIso.textContent = idRes.ok ? `UMD Ready (${idRes.discId})` : 'Raw Stream Ready';
+                    badgeIso.className = 'badge ok';
+                    drawBanner(idRes.title || game.title, idRes.discId || '');
+
+                    try {
+                        const host = await createCoreHost({
+                            canvas: targetCanvas,
+                            workerA,
+                            discSize: openRes.size || game.discSize,
+                            getLatestSnapshot: () => latestSnapshot,
+                            onFirstFrame: () => {
+                                if (myGen !== launchGen) return;
+                                bannerEl.style.display = 'none';
+                            },
+                            onFatal: (msg) => {
+                                if (myGen !== launchGen) return;
+                                badgeIso.textContent = msg || 'WebGL2 Error';
+                                badgeIso.className = 'badge warn';
+                            },
+                        });
+                        if (myGen !== launchGen) {
+                            await host.shutdown();
+                            return;
+                        }
+                        coreHost = host;
+                        window.__ppssppCoreHost = host;
+                    } catch (err) {
+                        if (myGen === launchGen) {
+                            badgeIso.textContent = err?.message || 'WebGL2 Boot Error';
+                            badgeIso.className = 'badge warn';
+                        }
                     }
                 } else if (type === 'HUD_SNAPSHOT') {
                     latestSnapshot = snapshot || e.data;
                     if (hud && showHud) {
                         hud.render(latestSnapshot, {
                             storageMode: opfsMode,
-                            gpuStatus: 'WebGL2 Target',
+                            gpuStatus: coreHost ? `WebGL2 (${coreHost.getFrameCount()}f)` : 'WebGL2 Target',
                             vramLabel: `Unified Slab (${activePoolMb} MB)`
                         });
                     }
@@ -229,17 +293,41 @@
         }
 
         function exitToMenu() {
-            if (workerA) { workerA.terminate(); workerA = null; }
-            const oldB = workerB;
-            workerB = null;
-            if (oldB) {
-                let done = false;
-                const stop = () => { if (!done) { done = true; oldB.terminate(); } };
-                oldB.onmessage = (ev) => { if (ev.data?.type === 'TELEM_FLUSHED') stop(); };
-                oldB.postMessage({ type: 'FLUSH_TELEMETRY', reason: 'menu' });
-                setTimeout(stop, 150);
-            }
-            viewport.style.display = 'none';
+            ++launchGen;
+            if (exitPromise) return exitPromise;
+
+            exitPromise = (async () => {
+                const oldHost = coreHost;
+                coreHost = null;
+                window.__ppssppCoreHost = null;
+                if (oldHost) {
+                    await oldHost.shutdown();
+                }
+
+                if (workerA) { workerA.terminate(); workerA = null; }
+                const oldB = workerB;
+                workerB = null;
+                if (oldB) {
+                    await new Promise((resolve) => {
+                        let done = false;
+                        const stop = () => {
+                            if (!done) {
+                                done = true;
+                                oldB.terminate();
+                                resolve();
+                            }
+                        };
+                        oldB.onmessage = (ev) => { if (ev.data?.type === 'TELEM_FLUSHED') stop(); };
+                        oldB.postMessage({ type: 'FLUSH_TELEMETRY', reason: 'menu' });
+                        setTimeout(stop, 150);
+                    });
+                }
+                viewport.style.display = 'none';
+            })().finally(() => {
+                exitPromise = null;
+            });
+
+            return exitPromise;
         }
 
         document.getElementById('btn-toggle-hud').addEventListener('click', () => {
@@ -248,7 +336,11 @@
                 const ctx = hudCanvas.getContext('2d');
                 if (ctx) ctx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
             } else if (latestSnapshot && hud) {
-                hud.render(latestSnapshot, { storageMode: opfsMode, gpuStatus: 'WebGL2 Target', vramLabel: `Unified Slab (${activePoolMb} MB)` });
+                hud.render(latestSnapshot, {
+                    storageMode: opfsMode,
+                    gpuStatus: coreHost ? `WebGL2 (${coreHost.getFrameCount()}f)` : 'WebGL2 Target',
+                    vramLabel: `Unified Slab (${activePoolMb} MB)`
+                });
             }
         });
         document.getElementById('btn-return-menu').addEventListener('click', exitToMenu);
