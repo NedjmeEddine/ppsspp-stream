@@ -54,7 +54,7 @@
 - **Scope:** Audio output bridge (`AudioWorklet`/WebAudio) and menu-exit / game-switch teardown across `web/index.html`, `web/worker_a.js`, and `web/worker_b.js`.
 - **Acceptance Checks (TDD Spec):**
   - `AC-4.1`: Given user-initiated game launch, when the core emits stereo 44.1/48 kHz PCM samples, then WebAudio outputs audio with bounded latency and no unbounded buffer growth.
-  - `AC-4.2` (error/edge): Given an active game when "XMB Menu" is clicked, another game is launched, or `visibilitychange` transitions to `hidden`, then `AudioContext` closes cleanly, Worker B receives `FLUSH_TELEMETRY` and acks `TELEM_FLUSHED` (or hits bounded timeout) before termination, and launching a second game succeeds without leaks.
+  - `AC-4.2` (error/edge): Given an active game when "XMB Menu" is clicked or another game is launched, then `AudioContext` closes cleanly (`close()`), Worker B receives `FLUSH_TELEMETRY` and acks `TELEM_FLUSHED` (or hits bounded timeout) before termination, and launching a second game succeeds without leaks; when `visibilitychange` transitions to `hidden`, `AudioContext` suspends (`suspend()`) cleanly (resuming on `visible`) and flushes telemetry without killing the running game.
 - **Invariants:** Existing `npm run test:ui`, `test:disc`, and `test:e2e` suites remain green.
 
 ### Slice 5: Persistent PSP Memory Stick Saves (OPFS)

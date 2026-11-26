@@ -19,5 +19,8 @@
   },
   "devDependencies": {
     "playwright": "^1.65.1"
+  },
+  "dependencies": {
+    "ringbuf.js": "^0.4.0"
   }
 }

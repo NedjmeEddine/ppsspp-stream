@@ -104,6 +104,7 @@
         import { createHudOverlay } from './hud_overlay.mjs';
         import { createCoreHost } from './core_host.mjs';
         import { createInputBridge } from './input_bridge.mjs';
+        import { createAudioBridge } from './audio_bridge.mjs';
 
         const grid = document.getElementById('game-grid');
         const badgeIso = document.getElementById('badge-iso');
@@ -121,6 +122,7 @@
         let workerB = null;
         let coreHost = null;
         let inputBridge = null;
+        let audioBridge = null;
         let exitPromise = null;
         let launchGen = 0;
         let hud = null;
@@ -169,21 +171,47 @@
 
         async function launchGame(game) {
             const myGen = ++launchGen;
+            // Start AudioContext creation immediately inside click gesture if available
+            const audioInitPromise = createAudioBridge({ sampleRate: 44100 }).catch(() => null);
+
             if (exitPromise) {
                 await exitPromise;
-                if (myGen !== launchGen) return;
+                if (myGen !== launchGen) {
+                    const ab = await audioInitPromise;
+                    if (ab) await ab.close();
+                    return;
+                }
             }
             if (inputBridge) {
                 inputBridge.destroy();
                 inputBridge = null;
                 window.__ppssppInputBridge = null;
             }
+            if (audioBridge) {
+                await audioBridge.close();
+                audioBridge = null;
+                window.__ppssppAudioBridge = null;
+            }
             if (coreHost) {
                 await coreHost.shutdown();
                 coreHost = null;
                 window.__ppssppCoreHost = null;
-                if (myGen !== launchGen) return;
+                if (myGen !== launchGen) {
+                    const ab = await audioInitPromise;
+                    if (ab) await ab.close();
+                    return;
+                }
             }
+
+            audioBridge = await audioInitPromise;
+            if (myGen !== launchGen) {
+                if (audioBridge) {
+                    await audioBridge.close();
+                    audioBridge = null;
+                }
+                return;
+            }
+            window.__ppssppAudioBridge = audioBridge;
 
             viewport.style.display = 'flex';
             gameLabel.textContent = `${game.title} (PSP)`;
@@ -255,8 +283,9 @@
                             workerA,
                             discSize: openRes.size || game.discSize,
                             getLatestSnapshot: () => latestSnapshot,
-                            onFrame: () => {
+                            onFrame: (_, mod) => {
                                 inputBridge?.poll();
+                                audioBridge?.pump(mod);
                             },
                             onFirstFrame: () => {
                                 if (myGen !== launchGen) return;
@@ -320,6 +349,13 @@
                     oldInput.destroy();
                 }
 
+                const oldAudio = audioBridge;
+                audioBridge = null;
+                window.__ppssppAudioBridge = null;
+                if (oldAudio) {
+                    await oldAudio.close();
+                }
+
                 const oldHost = coreHost;
                 coreHost = null;
                 window.__ppssppCoreHost = null;
@@ -369,9 +405,15 @@
         document.getElementById('btn-return-menu').addEventListener('click', exitToMenu);
 
         document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'hidden' && workerB) {
-                workerB.postMessage({ type: 'FLUSH_TELEMETRY', reason: 'pagehide' });
+            if (document.visibilityState === 'hidden') {
+                if (audioBridge) audioBridge.suspend().catch(() => {});
+                if (workerB) workerB.postMessage({ type: 'FLUSH_TELEMETRY', reason: 'pagehide' });
+            } else if (document.visibilityState === 'visible') {
+                if (audioBridge && coreHost) audioBridge.resume().catch(() => {});
             }
+        });
+        window.addEventListener('pagehide', () => {
+            if (audioBridge) audioBridge.close().catch(() => {});
         });
 
         fetch('/games.json')
