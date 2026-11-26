@@ -221,8 +221,6 @@ async function boot(gameId, manifestUrl) {
             if (aType === 'ARENA_READY') {
                 let opfsHandle = null;
                 let opfsMode = 'stream-only';
-                const initialSaves = new Map();
-                let savesDir = null;
 
                 try {
                     if (navigator.storage && navigator.storage.getDirectory) {
@@ -244,41 +242,11 @@ async function boot(gameId, manifestUrl) {
                                 }
                             }
                         }
-                        try {
-                            const baseSaves = await root.getDirectoryHandle('saves', { create: true });
-                            savesDir = gameId ? await baseSaves.getDirectoryHandle(gameId, { create: true }) : baseSaves;
-                            for await (const [name, handle] of savesDir.entries()) {
-                                if (handle.kind === 'file') {
-                                    const file = await handle.getFile();
-                                    initialSaves.set(name, new Uint8Array(await file.arrayBuffer()));
-                                }
-                            }
-                        } catch {
-                            savesDir = null;
-                        }
                     }
                 } catch {
                     opfsHandle = null;
                     opfsMode = 'stream-only';
                 }
-
-                const onSaveWrite = async (name, buf) => {
-                    if (!savesDir) return;
-                    try {
-                        const fileHandle = await savesDir.getFileHandle(name, { create: true });
-                        if (fileHandle.createSyncAccessHandle) {
-                            const syncHandle = await fileHandle.createSyncAccessHandle();
-                            syncHandle.truncate(0);
-                            syncHandle.write(buf, { at: 0 });
-                            if (syncHandle.flush) syncHandle.flush();
-                            syncHandle.close();
-                        } else {
-                            const writable = await fileHandle.createWritable();
-                            await writable.write(buf);
-                            await writable.close();
-                        }
-                    } catch {}
-                };
 
                 core = new WorkerBCore({
                     wasmMemory,
@@ -286,8 +254,8 @@ async function boot(gameId, manifestUrl) {
                     manifest,
                     neighbors,
                     opfsHandle,
-                    initialSaves,
-                    onSaveWrite,
+                    initialSaves: new Map(),
+                    onSaveWrite: null,
                     fetchFn: (reqUrl, reqOpts) => {
                         const target = (isGameSpecific && typeof reqUrl === 'string' && reqUrl.startsWith('/packs/'))
                             ? `/games/${gameId}${reqUrl}`

@@ -23,18 +23,23 @@ export async function createAudioBridge({ sampleRate = 44100 } = {}) {
     let closePromise = null;
     let enqueuedFrames = 0;
 
-    await audioCtx.audioWorklet.addModule('./audio_worklet.js');
-    if (audioCtx.state === 'closed') {
-        throw new Error('AudioContext closed before AudioWorklet finished loading');
-    }
+    try {
+        await audioCtx.audioWorklet.addModule('./audio_worklet.js');
+        if (audioCtx.state === 'closed') {
+            throw new Error('AudioContext closed before AudioWorklet finished loading');
+        }
 
-    workletNode = new AudioWorkletNode(audioCtx, 'ppsspp-audio-processor', {
-        numberOfInputs: 0,
-        numberOfOutputs: 1,
-        outputChannelCount: [2],
-        processorOptions: { sab },
-    });
-    workletNode.connect(audioCtx.destination);
+        workletNode = new AudioWorkletNode(audioCtx, 'ppsspp-audio-processor', {
+            numberOfInputs: 0,
+            numberOfOutputs: 1,
+            outputChannelCount: [2],
+            processorOptions: { sab },
+        });
+        workletNode.connect(audioCtx.destination);
+    } catch (err) {
+        await audioCtx.close().catch(() => {});
+        throw err;
+    }
 
     if (audioCtx.state === 'suspended') {
         try {
@@ -58,7 +63,7 @@ export async function createAudioBridge({ sampleRate = 44100 } = {}) {
             }
             if (!scratchPtr) return 0;
 
-            const availSamples = writer.available_write();
+            const availSamples = writer.availableWrite();
             const maxFrames = Math.min(2048, Math.floor(availSamples / 2));
             if (maxFrames <= 0) return 0;
 

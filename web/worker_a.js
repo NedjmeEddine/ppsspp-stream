@@ -1,5 +1,4 @@
 import createVfsModule from './vfs.js';
-import * as Offsets from './vfs_offsets.js';
 
 let portB = null;
 let wasmModule = null;
@@ -9,8 +8,7 @@ let arenaPtr = 0;
 let fsPtr = 0;
 let blockDevPtr = 0;
 let scratchBufPtr = 0;
-let tocBufPtr = 0;
-let tocBufCap = 4 * 1024 * 1024;
+let scratchView = null;
 const FS_IPC_MAX_READ_BYTES = 4 * 1024 * 1024;
 const VFS_IPC_MAX_READ_BYTES = 524288;
 let pathBufPtr = 0;
@@ -75,7 +73,7 @@ async function runVfsIpcLoop(generation, sab, byteOffset) {
             if (blockDevPtr && len > 0 && len <= VFS_IPC_MAX_READ_BYTES) {
                 const ok = wasmModule._vfs_block_read(blockDevPtr, offset, BigInt(len), scratchBufPtr);
                 if (ok === 1) {
-                    ipcPayload.set(new Uint8Array(wasmMemory.buffer, scratchBufPtr, len));
+                    ipcPayload.set(scratchView.subarray(0, len));
                     status = 1;
                 } else if (wasmModule._vfs_read_sync) {
                     const probe = Number(wasmModule._vfs_read_sync(ctxPtr, 0n, outBufPtr, 1));
@@ -143,11 +141,6 @@ self.onmessage = async (e) => {
         return;
     }
 
-    if (type === 'HINT_COLD') {
-        wasmModule._vfs_hint_cold(ctxPtr, Number(msg.blockId));
-        return;
-    }
-
     if (type === 'DISC_OPEN') {
         const pathBytes = new TextEncoder().encode((msg.path || 'game.iso') + '\0');
         if (pathBytes.length > 1024) {
@@ -199,37 +192,6 @@ self.onmessage = async (e) => {
         return;
     }
 
-    if (type === 'DISC_READ') {
-        if (!blockDevPtr) {
-            self.postMessage({ type: 'DISC_READ_RES', id: msg.id, ok: false, error: 'no open disc' });
-            return;
-        }
-        const len = Number(msg.len);
-        if (!Number.isSafeInteger(len) || len < 0 || len > FS_IPC_MAX_READ_BYTES) {
-            self.postMessage({ type: 'DISC_READ_RES', id: msg.id, ok: false, error: 'invalid length' });
-            return;
-        }
-        let offset;
-        try {
-            offset = BigInt(msg.offset || 0);
-        } catch {
-            self.postMessage({ type: 'DISC_READ_RES', id: msg.id, ok: false, error: 'invalid offset' });
-            return;
-        }
-        const success = wasmModule._vfs_block_read(blockDevPtr, offset, BigInt(len), scratchBufPtr);
-        if (success === 1) {
-            const bytes = len > 0 ? new Uint8Array(wasmMemory.buffer, scratchBufPtr, len).slice() : new Uint8Array(0);
-            self.postMessage({ type: 'DISC_READ_RES', id: msg.id, ok: true, bytes: bytes.buffer }, len > 0 ? [bytes.buffer] : []);
-        } else {
-            if (wasmModule._vfs_read_sync) {
-                const probe = Number(wasmModule._vfs_read_sync(ctxPtr, 0n, outBufPtr, 1));
-                if (probe === -2) postBuildRotated();
-            }
-            self.postMessage({ type: 'DISC_READ_RES', id: msg.id, ok: false });
-        }
-        return;
-    }
-
     if (type === 'DISC_READ_SECTORS') {
         if (!blockDevPtr) {
             self.postMessage({ type: 'DISC_READ_SECTORS_RES', id: msg.id, ok: false, error: 'no open disc' });
@@ -259,21 +221,6 @@ self.onmessage = async (e) => {
         }
         self.postMessage({ type: 'DISC_CLOSE_RES', id: msg.id, ok: true });
         return;
-    }
-
-    if (type === 'FS_MOUNT') {
-        const mountFlags = msg.mountFlags !== undefined ? Number(msg.mountFlags) : Offsets.VFS_FS_MOUNT_TELEM_HYBRID;
-        const dv = new DataView(wasmMemory.buffer, outBufPtr, 4);
-        dv.setUint32(0, 0, true);
-        const rc = wasmModule._vfs_fs_mount(fsPtr, ctxPtr, tocBufPtr, tocBufCap, mountFlags, outBufPtr);
-        self.postMessage({
-            type: 'FS_MOUNT_RES',
-            id: msg.id,
-            ok: rc === Offsets.VFS_FS_OK,
-            code: rc,
-            requiredBytes: dv.getUint32(0, true)
-        });
-        if (rc === -2) postBuildRotated();
     }
 };
 
@@ -318,7 +265,7 @@ function setupPortB() {
                 new DataView(wasmMemory.buffer, fsPtr, 4).setUint32(0, ctxPtr, true);
 
                 scratchBufPtr = wasmModule._malloc(FS_IPC_MAX_READ_BYTES);
-                tocBufPtr = wasmModule._malloc(tocBufCap);
+                scratchView = new Uint8Array(wasmMemory.buffer, scratchBufPtr, FS_IPC_MAX_READ_BYTES);
                 pathBufPtr = wasmModule._malloc(1024);
                 outBufPtr = wasmModule._malloc(16);
 
