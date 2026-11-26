@@ -163,6 +163,45 @@ test('AC-4.2: Visibility Suspend/Resume and Deterministic Game A -> XMB Menu -> 
 
         await page.click('#btn-return-menu');
         await page.waitForSelector('#viewport-wrapper', { state: 'hidden' });
+
+        // Internal PPSSPP exit (_ppsspp_stream_request_shutdown -> onShutdownComplete) must trigger full exitToMenu teardown
+        await cards[0].click();
+        await page.waitForFunction(() => {
+            const host = window.__ppssppCoreHost;
+            return host && host.getFrameCount() >= 2;
+        }, null, { timeout: 10000 });
+        await page.evaluate(() => {
+            window.__ppssppCoreHost.getModule()._ppsspp_stream_request_shutdown();
+        });
+        await page.waitForSelector('#viewport-wrapper', { state: 'hidden', timeout: 5000 });
+        const afterInternalExit = await page.evaluate(() => ({
+            host: window.__ppssppCoreHost,
+            audio: window.__ppssppAudioBridge,
+            input: window.__ppssppInputBridge,
+            memstick: window.__ppssppMemstickSync,
+        }));
+        assert.deepEqual(afterInternalExit, { host: null, audio: null, input: null, memstick: null });
+
+        // Cancel-during-load: clicking XMB Menu immediately after launch must leave zero leaked globals and allow clean relaunch
+        await cards[0].click();
+        await page.click('#btn-return-menu');
+        await page.waitForSelector('#viewport-wrapper', { state: 'hidden' });
+        await page.waitForTimeout(400);
+        const afterCancel = await page.evaluate(() => ({
+            host: window.__ppssppCoreHost,
+            audio: window.__ppssppAudioBridge,
+            input: window.__ppssppInputBridge,
+            memstick: window.__ppssppMemstickSync,
+        }));
+        assert.deepEqual(afterCancel, { host: null, audio: null, input: null, memstick: null });
+
+        await cards[1].click();
+        await page.waitForFunction(() => {
+            const host = window.__ppssppCoreHost;
+            return host && host.getFrameCount() >= 2;
+        }, null, { timeout: 10000 });
+        await page.click('#btn-return-menu');
+        await page.waitForSelector('#viewport-wrapper', { state: 'hidden' });
     } finally {
         await browser.close();
         proc.kill('SIGTERM');

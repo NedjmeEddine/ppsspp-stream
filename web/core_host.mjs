@@ -32,7 +32,6 @@ export async function createCoreHost({
     onFirstFrame,
     onShutdownComplete,
     onFatal,
-    onStatus,
     onBeforeCallMain,
     onFrame,
     getLatestSnapshot,
@@ -72,9 +71,6 @@ export async function createCoreHost({
         },
         getLatestSnapshot() {
             return typeof getLatestSnapshot === 'function' ? getLatestSnapshot() : null;
-        },
-        isShuttingDown() {
-            return shuttingDown;
         },
         async shutdown() {
             if (shutdownPromise) return shutdownPromise;
@@ -134,7 +130,6 @@ export async function createCoreHost({
     };
 
     try {
-        onStatus?.('Loading PPSSPP WASM core...');
         const { default: createPpssppModule } = await import(coreUrl);
         if (shuttingDown) {
             cleanupListeners();
@@ -159,6 +154,12 @@ export async function createCoreHost({
                 if (!shuttingDown) onFirstFrame?.();
             },
             onShutdownComplete: () => {
+                if (rafId) {
+                    cancelAnimationFrame(rafId);
+                    rafId = 0;
+                }
+                terminated = true;
+                cleanupListeners();
                 if (shutdownResolve) shutdownResolve();
                 onShutdownComplete?.();
             },
@@ -205,7 +206,6 @@ export async function createCoreHost({
             return host;
         }
 
-        onStatus?.('Booting UMD...');
         let exitCode = 0;
         try {
             exitCode = mod.callMain([bootPath]);
@@ -235,6 +235,15 @@ export async function createCoreHost({
 
         return host;
     } catch (err) {
+        if (mod && !terminated) {
+            try {
+                mod.PThread?.terminateAllThreads?.();
+            } catch {
+                // Ignore if pthreads haven't started or already exited.
+            }
+            terminated = true;
+        }
+        cleanupListeners();
         reportFatal(`WebGL2 / Core initialization failed: ${err?.message || err}`);
         throw err;
     }

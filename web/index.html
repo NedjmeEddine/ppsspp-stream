@@ -102,10 +102,7 @@
 
     <script type="module">
         import { createHudOverlay } from './hud_overlay.mjs';
-        import { createCoreHost } from './core_host.mjs';
-        import { createInputBridge } from './input_bridge.mjs';
-        import { createAudioBridge } from './audio_bridge.mjs';
-        import { createMemstickSync } from './memstick_sync.mjs';
+        import { createGameSession } from './session.mjs';
 
         const grid = document.getElementById('game-grid');
         const badgeIso = document.getElementById('badge-iso');
@@ -119,31 +116,51 @@
         const gameLabel = document.getElementById('emu-game-label');
         let emuCanvas = document.getElementById('emulator-canvas');
 
-        let workerA = null;
-        let workerB = null;
-        let coreHost = null;
-        let inputBridge = null;
-        let audioBridge = null;
-        let memstickSync = null;
-        let exitPromise = null;
-        let launchGen = 0;
         let hud = null;
         let showHud = true;
-        let latestSnapshot = null;
-        let opfsMode = 'stream-only';
-        let activePoolMb = 64;
+
+        const session = createGameSession({
+            viewport,
+            gameLabel,
+            badgeIso,
+            badgeStream,
+            onDrawBanner(title, discId) {
+                bannerTitleEl.textContent = title || '';
+                bannerSubEl.textContent = discId ? `UMD ${discId} — Streaming 256 KB blocks` : 'Mounting UMD...';
+                bannerEl.style.display = 'flex';
+            },
+            onHideBanner() {
+                bannerEl.style.display = 'none';
+            },
+            onResetCanvas() {
+                const fresh = document.createElement('canvas');
+                fresh.id = 'emulator-canvas';
+                fresh.width = 480;
+                fresh.height = 272;
+                if (emuCanvas && emuCanvas.parentNode) {
+                    emuCanvas.parentNode.replaceChild(fresh, emuCanvas);
+                } else {
+                    stage.prepend(fresh);
+                }
+                emuCanvas = fresh;
+                return fresh;
+            },
+            onResizeHud: resizeHud,
+            onHudSnapshot(snap) {
+                if (hud && showHud && snap) {
+                    hud.render(snap, session.getHudContext());
+                }
+            },
+        });
 
         function resizeHud() {
             const rect = stage.getBoundingClientRect();
             hudCanvas.width = Math.max(1, Math.round(rect.width || viewport.clientWidth || 960));
             hudCanvas.height = Math.max(1, Math.round(rect.height || (viewport.clientHeight - 48) || 540));
             if (!hud) hud = createHudOverlay(hudCanvas);
-            if (hud && showHud && latestSnapshot) {
-                hud.render(latestSnapshot, {
-                    storageMode: opfsMode,
-                    gpuStatus: coreHost ? `WebGL2 (${coreHost.getFrameCount()}f)` : 'WebGL2 Target',
-                    vramLabel: `Unified Slab (${activePoolMb} MB)`
-                });
+            const snap = session.getLatestSnapshot();
+            if (hud && showHud && snap) {
+                hud.render(snap, session.getHudContext());
             }
         }
         window.addEventListener('resize', resizeHud);
@@ -151,312 +168,19 @@
             new ResizeObserver(resizeHud).observe(stage);
         }
 
-        function resetEmulatorCanvas() {
-            const fresh = document.createElement('canvas');
-            fresh.id = 'emulator-canvas';
-            fresh.width = 480;
-            fresh.height = 272;
-            if (emuCanvas && emuCanvas.parentNode) {
-                emuCanvas.parentNode.replaceChild(fresh, emuCanvas);
-            } else {
-                stage.prepend(fresh);
-            }
-            emuCanvas = fresh;
-            return fresh;
-        }
-
-        function drawBanner(title, discId) {
-            bannerTitleEl.textContent = title || '';
-            bannerSubEl.textContent = discId ? `UMD ${discId} — Streaming 256 KB blocks` : 'Mounting UMD...';
-            bannerEl.style.display = 'flex';
-        }
-
-        async function launchGame(game) {
-            const myGen = ++launchGen;
-            // Start AudioContext creation immediately inside click gesture if available
-            const audioInitPromise = createAudioBridge({ sampleRate: 44100 }).catch(() => null);
-
-            if (exitPromise) {
-                await exitPromise;
-                if (myGen !== launchGen) {
-                    const ab = await audioInitPromise;
-                    if (ab) await ab.close();
-                    return;
-                }
-            }
-            if (inputBridge) {
-                inputBridge.destroy();
-                inputBridge = null;
-                window.__ppssppInputBridge = null;
-            }
-            if (audioBridge) {
-                await audioBridge.close();
-                audioBridge = null;
-                window.__ppssppAudioBridge = null;
-            }
-            if (coreHost) {
-                await coreHost.shutdown();
-                coreHost = null;
-                window.__ppssppCoreHost = null;
-                if (memstickSync) {
-                    await memstickSync.flush('switch');
-                    memstickSync.destroy();
-                    memstickSync = null;
-                    window.__ppssppMemstickSync = null;
-                }
-                if (myGen !== launchGen) {
-                    const ab = await audioInitPromise;
-                    if (ab) await ab.close();
-                    return;
-                }
-            } else if (memstickSync) {
-                memstickSync.destroy();
-                memstickSync = null;
-                window.__ppssppMemstickSync = null;
-            }
-
-            audioBridge = await audioInitPromise;
-            if (myGen !== launchGen) {
-                if (audioBridge) {
-                    await audioBridge.close();
-                    audioBridge = null;
-                }
-                return;
-            }
-            window.__ppssppAudioBridge = audioBridge;
-
-            viewport.style.display = 'flex';
-            gameLabel.textContent = `${game.title} (PSP)`;
-            resizeHud();
-            const targetCanvas = resetEmulatorCanvas();
-            drawBanner(game.title, '');
-
-            if (workerA) { workerA.terminate(); workerA = null; }
-            if (workerB) { workerB.terminate(); workerB = null; }
-
-            const ch = new MessageChannel();
-            workerA = new Worker('worker_a.js', { type: 'module' });
-            workerB = new Worker('worker_b.js', { type: 'module' });
-
-            let nextId = 1;
-            const pending = new Map();
-            let coreBootStarted = false;
-            function callA(msg) {
-                return new Promise((resolve) => {
-                    const id = nextId++;
-                    pending.set(id, resolve);
-                    workerA.postMessage({ ...msg, id });
-                });
-            }
-
-            workerA.onmessage = (e) => {
-                const d = e.data || {};
-                if (d.type === 'BUILD_ROTATED') {
-                    badgeIso.textContent = 'Build Updated — Reload';
-                    badgeIso.className = 'badge warn';
-                    return;
-                }
-                if (d.id && pending.has(d.id)) {
-                    const res = pending.get(d.id);
-                    pending.delete(d.id);
-                    res(d);
-                }
-            };
-
-            workerB.onmessage = async (e) => {
-                if (myGen !== launchGen) return;
-                const { type, snapshot, opfsMode: mode, effectivePoolMB, reason } = e.data || {};
-                if (type === 'STATUS') {
-                    if (mode) opfsMode = mode;
-                    if (effectivePoolMB) activePoolMb = effectivePoolMB;
-                    badgeStream.textContent = `${activePoolMb} MB RAM Pool (${opfsMode})`;
-                    workerB.postMessage({ type: 'ENABLE_HUD', enabled: true });
-
-                    if (coreBootStarted) return;
-                    coreBootStarted = true;
-
-                    const openRes = await callA({ type: 'DISC_OPEN', path: 'game.iso' });
-                    if (myGen !== launchGen) return;
-                    if (!openRes.ok) {
-                        badgeIso.textContent = 'Disc Open Failed';
-                        badgeIso.className = 'badge warn';
-                        return;
-                    }
-
-                    const idRes = await callA({ type: 'DISC_IDENTIFY' });
-                    if (myGen !== launchGen) return;
-                    badgeIso.textContent = idRes.ok ? `UMD Ready (${idRes.discId})` : 'Raw Stream Ready';
-                    badgeIso.className = 'badge ok';
-                    drawBanner(idRes.title || game.title, idRes.discId || '');
-
-                    try {
-                        const host = await createCoreHost({
-                            canvas: targetCanvas,
-                            workerA,
-                            discSize: openRes.size || game.discSize,
-                            getLatestSnapshot: () => latestSnapshot,
-                            onBeforeCallMain: async (mod) => {
-                                const memstickDir =
-                                    typeof mod.ccall === 'function' && typeof mod._ppsspp_stream_get_memstick_dir === 'function'
-                                        ? mod.ccall('ppsspp_stream_get_memstick_dir', 'string')
-                                        : '/memstick';
-                                if (memstickSync) memstickSync.destroy();
-                                memstickSync = createMemstickSync({
-                                    mod,
-                                    workerB,
-                                    memstickDir,
-                                    onWarning: (msg) => {
-                                        if (myGen === launchGen) {
-                                            badgeIso.textContent = msg;
-                                            badgeIso.className = 'badge warn';
-                                        }
-                                    },
-                                });
-                                window.__ppssppMemstickSync = memstickSync;
-                                await memstickSync.hydrate();
-                                memstickSync.installHook();
-                            },
-                            onFrame: (_, mod) => {
-                                inputBridge?.poll();
-                                audioBridge?.pump(mod);
-                            },
-                            onFirstFrame: () => {
-                                if (myGen !== launchGen) return;
-                                bannerEl.style.display = 'none';
-                            },
-                            onFatal: (msg) => {
-                                if (myGen !== launchGen) return;
-                                badgeIso.textContent = msg || 'WebGL2 Error';
-                                badgeIso.className = 'badge warn';
-                            },
-                        });
-                        if (myGen !== launchGen) {
-                            await host.shutdown();
-                            return;
-                        }
-                        coreHost = host;
-                        if (inputBridge) inputBridge.destroy();
-                        inputBridge = createInputBridge({
-                            target: window,
-                            getModule: () => coreHost?.getModule(),
-                        });
-                        window.__ppssppInputBridge = inputBridge;
-                        window.__ppssppCoreHost = host;
-                    } catch (err) {
-                        if (myGen === launchGen) {
-                            badgeIso.textContent = err?.message || 'WebGL2 Boot Error';
-                            badgeIso.className = 'badge warn';
-                        }
-                    }
-                } else if (type === 'HUD_SNAPSHOT') {
-                    latestSnapshot = snapshot || e.data;
-                    if (hud && showHud) {
-                        hud.render(latestSnapshot, {
-                            storageMode: opfsMode,
-                            gpuStatus: coreHost ? `WebGL2 (${coreHost.getFrameCount()}f)` : 'WebGL2 Target',
-                            vramLabel: `Unified Slab (${activePoolMb} MB)`
-                        });
-                    }
-                } else if (type === 'BUILD_ROTATED') {
-                    badgeIso.textContent = 'Build Updated — Reload';
-                    badgeIso.className = 'badge warn';
-                } else if (type === 'FATAL') {
-                    badgeIso.textContent = `Worker Err: ${reason}`;
-                    badgeIso.className = 'badge warn';
-                }
-            };
-
-            workerA.postMessage({ type: 'PORT', port: ch.port1 }, [ch.port1]);
-            workerB.postMessage({ type: 'PORT', port: ch.port2, gameId: game.id }, [ch.port2]);
-        }
-
-        function exitToMenu() {
-            ++launchGen;
-            if (exitPromise) return exitPromise;
-
-            exitPromise = (async () => {
-                const oldInput = inputBridge;
-                inputBridge = null;
-                window.__ppssppInputBridge = null;
-                if (oldInput) {
-                    oldInput.destroy();
-                }
-
-                const oldAudio = audioBridge;
-                audioBridge = null;
-                window.__ppssppAudioBridge = null;
-                if (oldAudio) {
-                    await oldAudio.close();
-                }
-
-                const oldHost = coreHost;
-                coreHost = null;
-                window.__ppssppCoreHost = null;
-                if (oldHost) {
-                    await oldHost.shutdown();
-                }
-
-                const oldMemstick = memstickSync;
-                memstickSync = null;
-                window.__ppssppMemstickSync = null;
-                if (oldMemstick) {
-                    await oldMemstick.flush('menu');
-                    oldMemstick.destroy();
-                }
-
-                if (workerA) { workerA.terminate(); workerA = null; }
-                const oldB = workerB;
-                workerB = null;
-                if (oldB) {
-                    await new Promise((resolve) => {
-                        let done = false;
-                        const stop = () => {
-                            if (!done) {
-                                done = true;
-                                oldB.terminate();
-                                resolve();
-                            }
-                        };
-                        oldB.onmessage = (ev) => { if (ev.data?.type === 'TELEM_FLUSHED') stop(); };
-                        oldB.postMessage({ type: 'FLUSH_TELEMETRY', reason: 'menu' });
-                        setTimeout(stop, 150);
-                    });
-                }
-                viewport.style.display = 'none';
-            })().finally(() => {
-                exitPromise = null;
-            });
-
-            return exitPromise;
-        }
-
         document.getElementById('btn-toggle-hud').addEventListener('click', () => {
             showHud = !showHud;
             if (!showHud) {
                 const ctx = hudCanvas.getContext('2d');
                 if (ctx) ctx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
-            } else if (latestSnapshot && hud) {
-                hud.render(latestSnapshot, {
-                    storageMode: opfsMode,
-                    gpuStatus: coreHost ? `WebGL2 (${coreHost.getFrameCount()}f)` : 'WebGL2 Target',
-                    vramLabel: `Unified Slab (${activePoolMb} MB)`
-                });
+            } else {
+                const snap = session.getLatestSnapshot();
+                if (snap && hud) hud.render(snap, session.getHudContext());
             }
         });
-        document.getElementById('btn-return-menu').addEventListener('click', exitToMenu);
-
-        document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'hidden') {
-                if (audioBridge) audioBridge.suspend().catch(() => {});
-                if (memstickSync) memstickSync.flush('visibility').catch(() => {});
-                if (workerB) workerB.postMessage({ type: 'FLUSH_TELEMETRY', reason: 'pagehide' });
-            } else if (document.visibilityState === 'visible') {
-                if (audioBridge && coreHost) audioBridge.resume().catch(() => {});
-            }
-        });
-        window.addEventListener('pagehide', () => {
-            if (audioBridge) audioBridge.close().catch(() => {});
-        });
+        document.getElementById('btn-return-menu').addEventListener('click', session.exitToMenu);
+        document.addEventListener('visibilitychange', session.handleVisibilityChange);
+        window.addEventListener('pagehide', session.handlePageHide);
 
         fetch('/games.json')
             .then(r => r.ok ? r.json() : null)
@@ -475,7 +199,7 @@
                     btn.innerHTML = `<div class="game-title"></div><div class="game-meta"></div>`;
                     btn.querySelector('.game-title').textContent = g.title;
                     btn.querySelector('.game-meta').textContent = `PSP UMD • ${(g.discSize / (1024 * 1024)).toFixed(1)} MB`;
-                    btn.addEventListener('click', () => launchGame(g));
+                    btn.addEventListener('click', () => session.launchGame(g));
                     grid.appendChild(btn);
                 }
             })
