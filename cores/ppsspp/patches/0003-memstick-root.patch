@@ -1,0 +1,58 @@
+diff --git i/CMakeLists.txt w/CMakeLists.txt
+index db60343..d767972 100644
+--- i/CMakeLists.txt
++++ w/CMakeLists.txt
+@@ -328,6 +328,7 @@ if(EMSCRIPTEN)
+ 			Core/Loaders.cpp
+ 			Core/FileLoaders/WasmVfsFileLoader.cpp
+ 			SDL/SDLMain.cpp
++			UI/NativeApp.cpp
+ 			APPEND PROPERTY COMPILE_DEFINITIONS PPSSPP_STREAM_INTEGRATION=1)
+ 	endif()
+ 	if(WASM_THREADED_ADHOC)
+@@ -366,7 +367,7 @@ if(EMSCRIPTEN)
+ 		add_link_options("-sPTHREAD_POOL_SIZE=12" "-sPTHREAD_POOL_SIZE_STRICT=2")
+ 		add_link_options("-sMODULARIZE=1" "-sEXPORT_ES6=1" "-sEXPORT_NAME=createPpssppModule")
+ 		add_link_options("-sINCOMING_MODULE_JS_API=canvas,locateFile,print,printErr,setStatus,monitorRunDependencies,preRun,onRuntimeInitialized,onAbort,arguments,noInitialRun")
+-		add_link_options("-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_ppsspp_stream_get_ipc_ptr,_ppsspp_stream_set_disc_size,_ppsspp_stream_request_shutdown,_ppsspp_stream_get_frame_count,_ppsspp_stream_set_input,_ppsspp_stream_drain_audio")
++		add_link_options("-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_ppsspp_stream_get_ipc_ptr,_ppsspp_stream_set_disc_size,_ppsspp_stream_request_shutdown,_ppsspp_stream_get_frame_count,_ppsspp_stream_set_input,_ppsspp_stream_drain_audio,_ppsspp_stream_get_memstick_dir")
+ 	else()
+ 		add_link_options("-sALLOW_MEMORY_GROWTH=1" "-sINITIAL_MEMORY=${WASM_INITIAL_MEMORY}" "-sMAXIMUM_MEMORY=${WASM_MAXIMUM_MEMORY}")
+ 		add_link_options("-sPTHREAD_POOL_SIZE=Math.max(4,navigator.hardwareConcurrency||4)")
+diff --git i/UI/NativeApp.cpp w/UI/NativeApp.cpp
+index 6870b59..1fc4ffc 100644
+--- i/UI/NativeApp.cpp
++++ w/UI/NativeApp.cpp
+@@ -33,6 +33,10 @@
+ #include <algorithm>
+ #include <cstdlib>
+ #include <memory>
++
++#if defined(__EMSCRIPTEN__) && defined(PPSSPP_STREAM_INTEGRATION)
++#include <emscripten/emscripten.h>
++#endif
+ #include <mutex>
+ #include <thread>
+ 
+@@ -495,7 +499,11 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
+ 	else // Just in case
+ 		config = "./config";
+ 
++#if defined(PPSSPP_STREAM_INTEGRATION)
++	g_Config.memStickDirectory = Path("/memstick");
++#else
+ 	g_Config.memStickDirectory = Path(config) / "ppsspp";
++#endif
+ 	g_Config.flash0Directory = File::GetExeDirectory() / "assets/flash0";
+ 	if (getenv("HOME") != nullptr) {
+ 		g_Config.defaultCurrentDirectory = Path(getenv("HOME"));
+@@ -1614,3 +1622,9 @@ bool Native_UpdateScreenScale(int pixel_width, int pixel_height, float customSca
+ 		return false;
+ 	}
+ }
++
++#if defined(__EMSCRIPTEN__) && defined(PPSSPP_STREAM_INTEGRATION)
++extern "C" EMSCRIPTEN_KEEPALIVE const char *ppsspp_stream_get_memstick_dir() {
++	return "/memstick";
++}
++#endif

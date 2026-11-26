@@ -105,6 +105,7 @@
         import { createCoreHost } from './core_host.mjs';
         import { createInputBridge } from './input_bridge.mjs';
         import { createAudioBridge } from './audio_bridge.mjs';
+        import { createMemstickSync } from './memstick_sync.mjs';
 
         const grid = document.getElementById('game-grid');
         const badgeIso = document.getElementById('badge-iso');
@@ -123,6 +124,7 @@
         let coreHost = null;
         let inputBridge = null;
         let audioBridge = null;
+        let memstickSync = null;
         let exitPromise = null;
         let launchGen = 0;
         let hud = null;
@@ -196,11 +198,21 @@
                 await coreHost.shutdown();
                 coreHost = null;
                 window.__ppssppCoreHost = null;
+                if (memstickSync) {
+                    await memstickSync.flush('switch');
+                    memstickSync.destroy();
+                    memstickSync = null;
+                    window.__ppssppMemstickSync = null;
+                }
                 if (myGen !== launchGen) {
                     const ab = await audioInitPromise;
                     if (ab) await ab.close();
                     return;
                 }
+            } else if (memstickSync) {
+                memstickSync.destroy();
+                memstickSync = null;
+                window.__ppssppMemstickSync = null;
             }
 
             audioBridge = await audioInitPromise;
@@ -283,6 +295,27 @@
                             workerA,
                             discSize: openRes.size || game.discSize,
                             getLatestSnapshot: () => latestSnapshot,
+                            onBeforeCallMain: async (mod) => {
+                                const memstickDir =
+                                    typeof mod.ccall === 'function' && typeof mod._ppsspp_stream_get_memstick_dir === 'function'
+                                        ? mod.ccall('ppsspp_stream_get_memstick_dir', 'string')
+                                        : '/memstick';
+                                if (memstickSync) memstickSync.destroy();
+                                memstickSync = createMemstickSync({
+                                    mod,
+                                    workerB,
+                                    memstickDir,
+                                    onWarning: (msg) => {
+                                        if (myGen === launchGen) {
+                                            badgeIso.textContent = msg;
+                                            badgeIso.className = 'badge warn';
+                                        }
+                                    },
+                                });
+                                window.__ppssppMemstickSync = memstickSync;
+                                await memstickSync.hydrate();
+                                memstickSync.installHook();
+                            },
                             onFrame: (_, mod) => {
                                 inputBridge?.poll();
                                 audioBridge?.pump(mod);
@@ -363,6 +396,14 @@
                     await oldHost.shutdown();
                 }
 
+                const oldMemstick = memstickSync;
+                memstickSync = null;
+                window.__ppssppMemstickSync = null;
+                if (oldMemstick) {
+                    await oldMemstick.flush('menu');
+                    oldMemstick.destroy();
+                }
+
                 if (workerA) { workerA.terminate(); workerA = null; }
                 const oldB = workerB;
                 workerB = null;
@@ -407,6 +448,7 @@
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'hidden') {
                 if (audioBridge) audioBridge.suspend().catch(() => {});
+                if (memstickSync) memstickSync.flush('visibility').catch(() => {});
                 if (workerB) workerB.postMessage({ type: 'FLUSH_TELEMETRY', reason: 'pagehide' });
             } else if (document.visibilityState === 'visible') {
                 if (audioBridge && coreHost) audioBridge.resume().catch(() => {});
