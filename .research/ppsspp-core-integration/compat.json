@@ -1,0 +1,18 @@
+{
+  "ecosystem": "npm",
+  "status": "RESOLVES",
+  "reason": "Resolved 1 package(s) with permitted licenses",
+  "forbidden_licenses": [
+    "GPL",
+    "AGPL"
+  ],
+  "packages": [
+    {
+      "name": "ringbuf.js",
+      "version": "0.4.0",
+      "license": "MPL-2.0"
+    }
+  ],
+  "blocked_packages": [],
+  "unknown_license_packages": []
+}

@@ -1,0 +1,36 @@
+{
+  "topic": "ppsspp-core-integration",
+  "current_phase": 4,
+  "completed": true,
+  "decomposition_approved": true,
+  "approved_at": "2026-11-26T10:30:09Z",
+  "axes": [
+    {
+      "slug": "wasm-memory-topology",
+      "reversibility": "HARD_TO_REVERSE",
+      "verdict": "COMPOSE"
+    },
+    {
+      "slug": "ppsspp-emscripten-build",
+      "reversibility": "HARD_TO_REVERSE",
+      "verdict": "CLONE_OR_FORK"
+    },
+    {
+      "slug": "webgl2-canvas-threading",
+      "reversibility": "HARD_TO_REVERSE",
+      "verdict": "STEAL_PATTERN"
+    },
+    {
+      "slug": "audio-streaming-backend",
+      "reversibility": "HARD_TO_REVERSE",
+      "verdict": "ADOPT"
+    },
+    {
+      "slug": "memstick-opfs-bridge",
+      "reversibility": "HARD_TO_REVERSE",
+      "verdict": "COMPOSE"
+    }
+  ],
+  "last_verification_at": "2026-11-26T12:00:08Z",
+  "updated_at": "2026-11-26T12:00:32Z"
+}

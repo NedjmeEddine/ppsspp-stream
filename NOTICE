@@ -1,0 +1,16 @@
+PPSSPP-Stream is licensed under the MIT License (see LICENSE).
+
+Third-party components and their licenses:
+
+- externals/vfs-streamer (wasm-block-streamer): MIT License, Copyright (c)
+  2026 Nedjmeddine Boulenoir. This repository keeps it as an unmodified
+  submodule pinned at a3b8bd6.
+
+- PPSSPP (https://github.com/hrydgard/ppsspp) is GPL-2.0-or-later. Any
+  PPSSPP WebAssembly core, source, or compiled artifact is NOT part of this
+  repository's MIT-licensed code. It must be obtained from its own upstream
+  fork, built reproducibly, and documented with exact commit SHA, build flags,
+  and C ABI in docs/CORE_PORT.md. No compiled core binaries are vendored here.
+
+- ringbuf.js, if added for audio streaming, is MPL-2.0 and remains a separate
+  npm dependency; see .research/ppsspp-core-integration/compat.json.

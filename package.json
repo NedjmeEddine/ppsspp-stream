@@ -1,6 +1,12 @@
 {
   "name": "ppsspp-stream",
   "version": "1.0.0",
+  "description": "Out-of-core PPSSPP in the browser: PSP ISO streaming over HTTP 206 with a bounded SharedArrayBuffer cache.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NedjmeEddine/ppsspp-stream.git"
+  },
   "type": "module",
   "scripts": {
     "test:ui": "node --test web/ui.test.mjs",

@@ -12,6 +12,9 @@ block_device_test
 node_modules
 node_modules/
 
+# Research tool caches
+.research/.arxiv-cache/
+
 # Test & distribution artifacts
 dist/
 ROMs/
