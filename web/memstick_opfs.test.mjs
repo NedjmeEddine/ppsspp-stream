@@ -64,6 +64,29 @@ test('AC-5.1: Nested >256 KiB Save, Same-Size Overwrite CRC32 Diff, Quiescent Fl
             }
             const syncCountAfterFirst = sync.getStats().syncCount;
 
+            // Verify truncate (setattr) and rename-out-of-SAVEDATA both trigger auto-sync
+            const beforeHooksSyncs = sync.getStats().syncCount;
+            mod.FS.writeFile(`${saveDir}/TEMP.BIN`, new Uint8Array([1, 2, 3, 4]));
+            const d1 = performance.now() + 2000;
+            while (sync.getStats().syncCount <= beforeHooksSyncs && performance.now() < d1) {
+                await new Promise((r) => setTimeout(r, 50));
+            }
+            const afterWriteSyncs = sync.getStats().syncCount;
+
+            mod.FS.truncate(`${saveDir}/TEMP.BIN`, 2);
+            const d2 = performance.now() + 2000;
+            while (sync.getStats().syncCount <= afterWriteSyncs && performance.now() < d2) {
+                await new Promise((r) => setTimeout(r, 50));
+            }
+            const afterTruncateSyncs = sync.getStats().syncCount;
+
+            mod.FS.rename(`${saveDir}/TEMP.BIN`, '/tmp/TEMP.BIN');
+            const d3 = performance.now() + 2000;
+            while (sync.getStats().syncCount <= afterTruncateSyncs && performance.now() < d3) {
+                await new Promise((r) => setTimeout(r, 50));
+            }
+            const afterRenameSyncs = sync.getStats().syncCount;
+
             // Immediate same-size overwrite (pattern B) right before exiting -> tests CRC32 diff
             const dataB = dataA.slice();
             for (let i = 0; i < 16; i++) {
@@ -72,11 +95,18 @@ test('AC-5.1: Nested >256 KiB Save, Same-Size Overwrite CRC32 Diff, Quiescent Fl
             }
             mod.FS.writeFile(`${saveDir}/DATA.BIN`, dataB);
 
-            return { memstickDir, syncCountAfterFirst };
+            return {
+                memstickDir,
+                syncCountAfterFirst,
+                afterTruncate: afterTruncateSyncs > afterWriteSyncs,
+                afterRename: afterRenameSyncs > afterTruncateSyncs,
+            };
         });
 
         assert.equal(writeRes.memstickDir, '/memstick', '_ppsspp_stream_get_memstick_dir must return /memstick');
         assert.ok(writeRes.syncCountAfterFirst >= 1, `Expected debounced sync >= 1, got ${writeRes.syncCountAfterFirst}`);
+        assert.equal(writeRes.afterTruncate, true, 'truncate (setattr) must schedule debounced save sync');
+        assert.equal(writeRes.afterRename, true, 'rename out of SAVEDATA must schedule debounced save sync');
 
         // Quiescent exit flush
         await page.click('#btn-return-menu');
@@ -236,22 +266,71 @@ test('AC-5.2: opfsSaveQueue Serialization, BuildEtagHash Cache Invalidation Save
         await warnPage.click('.game-card');
         await warnPage.waitForFunction(() => window.__ppssppCoreHost && window.__ppssppCoreHost.getFrameCount() >= 2 && window.__ppssppMemstickSync);
 
-        // Simulate OPFS failure warning delivered via sync warning hook without crashing frames
+        // Simulate real OPFS failure via MEMSTICK_SYNC response and verify flush queue recovers afterwards
         const aliveAfterWarn = await warnPage.evaluate(async () => {
+            const { createMemstickSync } = await import('/memstick_sync.mjs');
+            const mod = window.__ppssppCoreHost.getModule();
             const badgeBefore = document.getElementById('badge-iso');
-            // Trigger sync handler warning path directly or via un-writable handle
-            const sync = window.__ppssppMemstickSync;
-            sync.triggerTestWarning?.('OPFS NoModificationAllowedError: save cache locked');
+
+            // 1. Test real MEMSTICK_SYNC failure -> onWarning -> #badge-iso
+            let failOnce = true;
+            const fakeWorkerB = {
+                listeners: new Set(),
+                addEventListener(_ev, fn) { this.listeners.add(fn); },
+                removeEventListener(_ev, fn) { this.listeners.delete(fn); },
+                postMessage(msg) {
+                    if (msg.type === 'MEMSTICK_SYNC') {
+                        if (failOnce) {
+                            failOnce = false;
+                            throw new Error('simulated transient postMessage failure');
+                        }
+                        queueMicrotask(() => {
+                            const ev = {
+                                data: {
+                                    type: 'MEMSTICK_SYNCED',
+                                    id: msg.id,
+                                    ok: false,
+                                    warning: 'OPFS NoModificationAllowedError: save cache locked',
+                                },
+                            };
+                            for (const fn of this.listeners) fn(ev);
+                        });
+                    }
+                },
+            };
+
+            let warned = '';
+            const testSync = createMemstickSync({
+                mod,
+                workerB: fakeWorkerB,
+                onWarning: (w) => {
+                    warned = w;
+                    badgeBefore.textContent = w;
+                    badgeBefore.className = 'badge warn';
+                },
+            });
+            mod.FS.mkdirTree('/memstick/PSP/SAVEDATA/WARN0001');
+            mod.FS.writeFile('/memstick/PSP/SAVEDATA/WARN0001/SAVE.BIN', new Uint8Array([1, 2, 3]));
+            let threwFirst = false;
+            try { await testSync.flush('manual'); } catch { threwFirst = true; }
+            const secondRes = await testSync.flush('manual');
+            testSync.destroy();
+
             const f1 = window.__ppssppCoreHost.getFrameCount();
             await new Promise((r) => setTimeout(r, 150));
             const f2 = window.__ppssppCoreHost.getFrameCount();
             return {
+                threwFirst,
+                secondOk: secondRes.ok,
+                warned,
                 warnClass: badgeBefore.className.includes('warn'),
                 warnText: badgeBefore.textContent,
                 framesAdvanced: f2 >= f1,
             };
         });
 
+        assert.equal(aliveAfterWarn.threwFirst, true, 'First flush should reject on postMessage throw');
+        assert.equal(aliveAfterWarn.secondOk, false, 'Flush queue must recover after rejection and run next flush');
         assert.equal(aliveAfterWarn.warnClass, true);
         assert.match(aliveAfterWarn.warnText || '', /OPFS|NoModificationAllowedError/i);
         assert.equal(aliveAfterWarn.framesAdvanced, true);

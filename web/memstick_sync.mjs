@@ -1,24 +1,6 @@
-const CRC_TABLE = (() => {
-    const tbl = new Uint32Array(256);
-    for (let i = 0; i < 256; i++) {
-        let c = i;
-        for (let k = 0; k < 8; k++) {
-            c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
-        }
-        tbl[i] = c >>> 0;
-    }
-    return tbl;
-})();
+import { crc32 } from './worker_b_core.mjs';
 
-function crc32(bytes) {
-    let c = 0xffffffff;
-    for (let i = 0; i < bytes.length; i++) {
-        c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
-    }
-    return (c ^ 0xffffffff) >>> 0;
-}
-
-function walkSaveTree(FS, saveRootPath) {
+function walkSaveTree(FS, saveRootPath, prevMeta = null) {
     const out = new Map();
 
     function walk(absDir, relPrefix) {
@@ -41,11 +23,23 @@ function walkSaveTree(FS, saveRootPath) {
             if (FS.isDir(st.mode)) {
                 walk(absPath, relPath);
             } else if (FS.isFile(st.mode)) {
+                const mtimeMs = Number(st.mtime || 0);
+                const prev = prevMeta ? prevMeta.get(relPath) : null;
+                if (prev && prev.size === st.size && prev.mtimeMs === mtimeMs) {
+                    out.set(relPath, {
+                        data: null,
+                        size: prev.size,
+                        mtimeMs,
+                        crc32: prev.crc32,
+                    });
+                    continue;
+                }
                 try {
                     const data = FS.readFile(absPath);
                     out.set(relPath, {
                         data,
                         size: data.byteLength,
+                        mtimeMs,
                         crc32: crc32(data),
                     });
                 } catch {
@@ -141,8 +135,10 @@ export function createMemstickSync({ mod, workerB, memstickDir = '/memstick', on
             }
             const bytes = entry.data instanceof Uint8Array ? entry.data : new Uint8Array(entry.data);
             FS.writeFile(targetPath, bytes);
+            let mtimeMs = 0;
+            try { mtimeMs = Number(FS.lstat(targetPath).mtime || 0); } catch { /* ignore */ }
             const saveRel = targetPath.slice(saveRootPath.length + 1);
-            nextSynced.set(saveRel, { size: bytes.byteLength, crc32: crc32(bytes) });
+            nextSynced.set(saveRel, { size: bytes.byteLength, mtimeMs, crc32: crc32(bytes) });
         }
 
         lastSynced = nextSynced;
@@ -196,8 +192,9 @@ export function createMemstickSync({ mod, workerB, memstickDir = '/memstick', on
                     return out;
                 });
                 wrapMethod(targetNodeOps, 'rename', (orig) => function (...args) {
+                    const wasSave = isSaveNodeOrStream(args[0]);
                     const out = orig.apply(this, args);
-                    if (isSaveNodeOrStream(args[0]) || isSaveNodeOrStream(args[1])) scheduleSync();
+                    if (wasSave || isSaveNodeOrStream(args[0]) || isSaveNodeOrStream(args[1])) scheduleSync();
                     return out;
                 });
                 wrapMethod(targetNodeOps, 'unlink', (orig) => function (...args) {
@@ -219,10 +216,9 @@ export function createMemstickSync({ mod, workerB, memstickDir = '/memstick', on
                 if (isSaveNodeOrStream(args[0])) scheduleSync();
                 return out;
             });
-            wrapMethod(fileNode.stream_ops, 'close', (orig) => function (...args) {
-                const check = isSaveNodeOrStream(args[0]);
+            wrapMethod(fileNode.node_ops, 'setattr', (orig) => function (...args) {
                 const out = orig.apply(this, args);
-                if (check) scheduleSync();
+                if (args[1]?.size !== undefined && isSaveNodeOrStream(args[0])) scheduleSync();
                 return out;
             });
 
@@ -240,21 +236,21 @@ export function createMemstickSync({ mod, workerB, memstickDir = '/memstick', on
             clearTimeout(debounceTimer);
             debounceTimer = null;
         }
-        flushQueue = flushQueue.then(async () => {
+        const run = async () => {
             if (!mod?.FS) return { ok: true, changed: 0 };
-            const current = walkSaveTree(mod.FS, saveRootPath);
+            const current = walkSaveTree(mod.FS, saveRootPath, reason === 'debounced' ? lastSynced : null);
             const upserts = [];
             const deletes = [];
             const nextSynced = new Map();
 
             for (const [relPath, entry] of current.entries()) {
-                nextSynced.set(relPath, { size: entry.size, crc32: entry.crc32 });
+                nextSynced.set(relPath, { size: entry.size, mtimeMs: entry.mtimeMs, crc32: entry.crc32 });
                 const prev = lastSynced.get(relPath);
                 if (!prev || prev.size !== entry.size || prev.crc32 !== entry.crc32) {
-                    const copy = entry.data.slice();
+                    const bytes = entry.data || mod.FS.readFile(`${saveRootPath}/${relPath}`);
                     upserts.push({
                         relPath: `PSP/SAVEDATA/${relPath}`,
-                        data: copy,
+                        data: bytes.slice(),
                     });
                 }
             }
@@ -285,16 +281,17 @@ export function createMemstickSync({ mod, workerB, memstickDir = '/memstick', on
 
             warn(res?.warning || 'OPFS Memory Stick save sync failed');
             return { ok: false, changed: 0, warning: res?.warning };
-        });
+        };
 
-        return flushQueue;
+        const p = flushQueue.then(run, run);
+        flushQueue = p.catch(() => {});
+        return p;
     }
 
     return {
         hydrate,
         installHook,
         flush,
-        triggerTestWarning: warn,
         getStats() {
             return {
                 memstickDir: normalizedRoot,
