@@ -103,6 +103,7 @@
     <script type="module">
         import { createHudOverlay } from './hud_overlay.mjs';
         import { createCoreHost } from './core_host.mjs';
+        import { createInputBridge } from './input_bridge.mjs';
 
         const grid = document.getElementById('game-grid');
         const badgeIso = document.getElementById('badge-iso');
@@ -119,6 +120,7 @@
         let workerA = null;
         let workerB = null;
         let coreHost = null;
+        let inputBridge = null;
         let exitPromise = null;
         let launchGen = 0;
         let hud = null;
@@ -170,6 +172,11 @@
             if (exitPromise) {
                 await exitPromise;
                 if (myGen !== launchGen) return;
+            }
+            if (inputBridge) {
+                inputBridge.destroy();
+                inputBridge = null;
+                window.__ppssppInputBridge = null;
             }
             if (coreHost) {
                 await coreHost.shutdown();
@@ -248,6 +255,9 @@
                             workerA,
                             discSize: openRes.size || game.discSize,
                             getLatestSnapshot: () => latestSnapshot,
+                            onFrame: () => {
+                                inputBridge?.poll();
+                            },
                             onFirstFrame: () => {
                                 if (myGen !== launchGen) return;
                                 bannerEl.style.display = 'none';
@@ -263,6 +273,12 @@
                             return;
                         }
                         coreHost = host;
+                        if (inputBridge) inputBridge.destroy();
+                        inputBridge = createInputBridge({
+                            target: window,
+                            getModule: () => coreHost?.getModule(),
+                        });
+                        window.__ppssppInputBridge = inputBridge;
                         window.__ppssppCoreHost = host;
                     } catch (err) {
                         if (myGen === launchGen) {
@@ -297,6 +313,13 @@
             if (exitPromise) return exitPromise;
 
             exitPromise = (async () => {
+                const oldInput = inputBridge;
+                inputBridge = null;
+                window.__ppssppInputBridge = null;
+                if (oldInput) {
+                    oldInput.destroy();
+                }
+
                 const oldHost = coreHost;
                 coreHost = null;
                 window.__ppssppCoreHost = null;

@@ -39,6 +39,8 @@ This document tracks how the upstream PPSSPP emulator core integrates with `ppss
 * `_ppsspp_stream_set_disc_size(uint64_t size)` -> initializes mailbox state and stores `disc_size`.
 * `_ppsspp_stream_request_shutdown()` -> sets `g_QuitRequested = true`, aborts IPC futexes (`abort_flag = 1`, `resp_futex.fetch_add(1)`, `req_futex.fetch_add(1)`), and requests non-blocking `EmuThreadStop`.
 * `_ppsspp_stream_get_frame_count()` -> returns monotonically increasing rendered WebGL2 frame count.
+* `_ppsspp_stream_set_input(uint32_t buttons, uint8_t lx, uint8_t ly)` -> translates non-overlapping PSP button masks & `0..255` analog axes to `NativeKey` / `NativeAxis` (`0002-input-and-audio-hooks.patch`).
+* `_ppsspp_stream_drain_audio(float *outInterleaved, int maxFrames, int outSampleRate)` -> pulls stereo 44.1 kHz `NativeMix()` PCM and resamples to `outSampleRate` (`0002-input-and-audio-hooks.patch`).
 
 ---
 

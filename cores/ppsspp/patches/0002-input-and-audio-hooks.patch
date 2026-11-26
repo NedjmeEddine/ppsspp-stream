@@ -1,0 +1,222 @@
+diff --git i/CMakeLists.txt w/CMakeLists.txt
+index cc836c8..db60343 100644
+--- i/CMakeLists.txt
++++ w/CMakeLists.txt
+@@ -366,7 +366,7 @@ if(EMSCRIPTEN)
+ 		add_link_options("-sPTHREAD_POOL_SIZE=12" "-sPTHREAD_POOL_SIZE_STRICT=2")
+ 		add_link_options("-sMODULARIZE=1" "-sEXPORT_ES6=1" "-sEXPORT_NAME=createPpssppModule")
+ 		add_link_options("-sINCOMING_MODULE_JS_API=canvas,locateFile,print,printErr,setStatus,monitorRunDependencies,preRun,onRuntimeInitialized,onAbort,arguments,noInitialRun")
+-		add_link_options("-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_ppsspp_stream_get_ipc_ptr,_ppsspp_stream_set_disc_size,_ppsspp_stream_request_shutdown,_ppsspp_stream_get_frame_count")
++		add_link_options("-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_ppsspp_stream_get_ipc_ptr,_ppsspp_stream_set_disc_size,_ppsspp_stream_request_shutdown,_ppsspp_stream_get_frame_count,_ppsspp_stream_set_input,_ppsspp_stream_drain_audio")
+ 	else()
+ 		add_link_options("-sALLOW_MEMORY_GROWTH=1" "-sINITIAL_MEMORY=${WASM_INITIAL_MEMORY}" "-sMAXIMUM_MEMORY=${WASM_MAXIMUM_MEMORY}")
+ 		add_link_options("-sPTHREAD_POOL_SIZE=Math.max(4,navigator.hardwareConcurrency||4)")
+diff --git i/SDL/SDLMain.cpp w/SDL/SDLMain.cpp
+index a3909a9..f554fe3 100644
+--- i/SDL/SDLMain.cpp
++++ w/SDL/SDLMain.cpp
+@@ -948,8 +948,10 @@ case SYSPROP_HAS_FILE_BROWSER:
+ void System_Notify(SystemNotification notification) {
+ 	switch (notification) {
+ 	case SystemNotification::AUDIO_RESET_DEVICE:
++#if !defined(PPSSPP_STREAM_INTEGRATION)
+ 		StopSDLAudioDevice();
+ 		InitSDLAudioDevice();
++#endif
+ 		break;
+ 
+ 	default:
+@@ -1262,6 +1264,7 @@ static void ProcessSDLEvent(SDL_Window *window, const SDL_Event &event, InputSta
+ 		}
+ 		break;
+ #endif
++#if !defined(PPSSPP_STREAM_INTEGRATION)
+ 	case SDL_KEYDOWN:
+ 		{
+ 			if (event.key.repeat > 0) { break;}
+@@ -1337,6 +1340,7 @@ static void ProcessSDLEvent(SDL_Window *window, const SDL_Event &event, InputSta
+ 			NativeKey(key);
+ 			break;
+ 		}
++#endif
+ 	// This behavior doesn't feel right on a macbook with a touchpad.
+ #if !PPSSPP_PLATFORM(MAC)
+ 	case SDL_FINGERMOTION:
+@@ -1544,7 +1548,7 @@ static void ProcessSDLEvent(SDL_Window *window, const SDL_Event &event, InputSta
+ 		}
+ 		break;
+ 
+-#if SDL_VERSION_ATLEAST(2, 0, 4)
++#if SDL_VERSION_ATLEAST(2, 0, 4) && !defined(PPSSPP_STREAM_INTEGRATION)
+ 	case SDL_AUDIODEVICEADDED:
+ 		// Automatically switch to the new device.
+ 		if (event.adevice.iscapture == 0) {
+@@ -1678,6 +1682,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void PPSSPP_ToggleFullscreen() {
+ }
+ 
+ #if defined(PPSSPP_STREAM_INTEGRATION)
++static uint32_t g_streamPrevButtons = 0;
++static uint8_t g_streamPrevLx = 128;
++static uint8_t g_streamPrevLy = 128;
++static std::atomic<bool> g_streamAudioReset{false};
++
+ extern "C" {
+ EMSCRIPTEN_KEEPALIVE void ppsspp_stream_request_shutdown() {
+ 	g_QuitRequested = true;
+@@ -1688,6 +1697,126 @@ EMSCRIPTEN_KEEPALIVE void ppsspp_stream_request_shutdown() {
+ EMSCRIPTEN_KEEPALIVE int ppsspp_stream_get_frame_count() {
+ 	return g_renderedFrames.load(std::memory_order_acquire);
+ }
++
++EMSCRIPTEN_KEEPALIVE void ppsspp_stream_set_input(uint32_t buttons, uint8_t lx, uint8_t ly) {
++	if (g_QuitRequested) {
++		return;
++	}
++	struct StreamButtonMap {
++		uint32_t mask;
++		InputKeyCode nk;
++	};
++	static const StreamButtonMap kStreamBtnMap[] = {
++		{ 0x000001u, NKCODE_BUTTON_9 },      // CTRL_SELECT
++		{ 0x000008u, NKCODE_BUTTON_10 },     // CTRL_START
++		{ 0x000010u, NKCODE_DPAD_UP },       // CTRL_UP
++		{ 0x000020u, NKCODE_DPAD_RIGHT },    // CTRL_RIGHT
++		{ 0x000040u, NKCODE_DPAD_DOWN },     // CTRL_DOWN
++		{ 0x000080u, NKCODE_DPAD_LEFT },     // CTRL_LEFT
++		{ 0x000100u, NKCODE_BUTTON_7 },      // CTRL_LTRIGGER
++		{ 0x000200u, NKCODE_BUTTON_8 },      // CTRL_RTRIGGER
++		{ 0x001000u, NKCODE_BUTTON_1 },      // CTRL_TRIANGLE
++		{ 0x002000u, NKCODE_BUTTON_3 },      // CTRL_CIRCLE
++		{ 0x004000u, NKCODE_BUTTON_2 },      // CTRL_CROSS
++		{ 0x008000u, NKCODE_BUTTON_4 },      // CTRL_SQUARE
++		{ 0x010000u, NKCODE_BUTTON_SELECT }, // VIRTKEY_PAUSE (Home)
++	};
++
++	const uint32_t changed = buttons ^ g_streamPrevButtons;
++	if (changed != 0) {
++		for (const auto &entry : kStreamBtnMap) {
++			if (changed & entry.mask) {
++				KeyInput key{};
++				key.flags = (buttons & entry.mask) ? KeyInputFlags::DOWN : KeyInputFlags::UP;
++				key.keyCode = entry.nk;
++				key.deviceId = DEVICE_ID_PAD_0;
++				NativeKey(key);
++			}
++		}
++		g_streamPrevButtons = buttons;
++	}
++
++	if (lx != g_streamPrevLx || ly != g_streamPrevLy) {
++		AxisInput axes[2]{};
++		axes[0].deviceId = DEVICE_ID_PAD_0;
++		axes[0].axisId = JOYSTICK_AXIS_X;
++		axes[0].value = std::clamp(((float)lx - 128.0f) / 128.0f, -1.0f, 1.0f);
++		axes[1].deviceId = DEVICE_ID_PAD_0;
++		axes[1].axisId = JOYSTICK_AXIS_Y;
++		axes[1].value = std::clamp(((float)ly - 128.0f) / 128.0f, -1.0f, 1.0f);
++		NativeAxis(axes, 2);
++		g_streamPrevLx = lx;
++		g_streamPrevLy = ly;
++	}
++}
++
++EMSCRIPTEN_KEEPALIVE int ppsspp_stream_drain_audio(float *outInterleaved, int maxFrames, int outSampleRate) {
++	if (g_QuitRequested || !outInterleaved || maxFrames <= 0 || outSampleRate <= 0) {
++		return 0;
++	}
++	constexpr int pspMixRate = 44100;
++	constexpr float wasmOutputGain = 0.95f;
++	static std::vector<short> mixBuffer;
++	static std::vector<short> sourceBuffer;
++	static int sourceStartSamples = 0;
++	static int sourceQueuedSamples = 0;
++	static uint32_t sourcePhase = 0;
++
++	if (g_streamAudioReset.exchange(false, std::memory_order_acq_rel)) {
++		sourceStartSamples = 0;
++		sourceQueuedSamples = 0;
++		sourcePhase = 0;
++	}
++
++	if (outSampleRate == pspMixRate) {
++		sourceStartSamples = 0;
++		sourceQueuedSamples = 0;
++		sourcePhase = 0;
++		mixBuffer.resize((size_t)maxFrames * 2);
++		NativeMix(mixBuffer.data(), maxFrames, pspMixRate, nullptr);
++		for (int i = 0; i < maxFrames * 2; i++) {
++			outInterleaved[i] = mixBuffer[i] * (wasmOutputGain / 32768.0f);
++		}
++		return maxFrames;
++	}
++
++	const uint32_t step = (uint32_t)(((uint64_t)pspMixRate << 16) / (uint32_t)outSampleRate);
++	const int neededSourceSamples = (int)(((uint64_t)sourcePhase + (uint64_t)step * (maxFrames - 1)) >> 16) + 2;
++	if (sourceQueuedSamples < neededSourceSamples) {
++		const int refillSamples = neededSourceSamples - sourceQueuedSamples + 256;
++		if (sourceStartSamples > 0 && (sourceStartSamples + sourceQueuedSamples + refillSamples) * 2 > (int)sourceBuffer.size()) {
++			std::move(sourceBuffer.begin() + sourceStartSamples * 2, sourceBuffer.begin() + (sourceStartSamples + sourceQueuedSamples) * 2, sourceBuffer.begin());
++			sourceStartSamples = 0;
++		}
++		const int writeStartSamples = sourceStartSamples + sourceQueuedSamples;
++		if ((writeStartSamples + refillSamples) * 2 > (int)sourceBuffer.size()) {
++			sourceBuffer.resize((size_t)(writeStartSamples + refillSamples) * 2);
++		}
++		mixBuffer.resize((size_t)refillSamples * 2);
++		NativeMix(mixBuffer.data(), refillSamples, pspMixRate, nullptr);
++		std::copy(mixBuffer.begin(), mixBuffer.end(), sourceBuffer.begin() + writeStartSamples * 2);
++		sourceQueuedSamples += refillSamples;
++	}
++
++	for (int i = 0; i < maxFrames; i++) {
++		const int src = (int)(sourcePhase >> 16);
++		const int frac = (int)(sourcePhase & 0xFFFF);
++		const short *source = sourceBuffer.data() + (sourceStartSamples + src) * 2;
++		for (int c = 0; c < 2; c++) {
++			const int a = source[c];
++			const int b = source[2 + c];
++			outInterleaved[i * 2 + c] = (a + (int)(((int64_t)(b - a) * frac) >> 16)) * (wasmOutputGain / 32768.0f);
++		}
++		sourcePhase += step;
++	}
++	const int consumed = (int)(sourcePhase >> 16);
++	if (consumed > 0) {
++		sourceStartSamples += consumed;
++		sourceQueuedSamples -= consumed;
++		sourcePhase &= 0xFFFF;
++	}
++	return maxFrames;
++}
+ }
+ #endif
+ 
+@@ -1882,6 +2011,10 @@ int main(int argc, char *argv[]) {
+ 	g_emuThreadFinished.store(0, std::memory_order_release);
+ 	g_renderedFrames.store(0, std::memory_order_release);
+ 	g_shutdownCleanupDone.store(false, std::memory_order_release);
++	g_streamPrevButtons = 0;
++	g_streamPrevLx = 128;
++	g_streamPrevLy = 128;
++	g_streamAudioReset.store(true, std::memory_order_release);
+ #endif
+ 	for (int i = 1; i < argc; i++) {
+ 		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h"))
+@@ -2263,6 +2396,7 @@ int main(int argc, char *argv[]) {
+ 
+ 	fprintf(stderr, "PPSSPP audio config enable=%d gameVolume=%d mode=%d buffer=%d\n",
+ 		g_Config.bEnableSound ? 1 : 0, g_Config.iGameVolume, g_Config.iAudioPlaybackMode, g_Config.iSDLAudioBufferSize);
++#if !defined(PPSSPP_STREAM_INTEGRATION)
+ 	InitSDLAudioDevice();
+ 	g_audioStartTime = time_now_d();
+ 	WASM_TRACE("audio init section done");
+@@ -2272,6 +2406,10 @@ int main(int argc, char *argv[]) {
+ 	} else {
+ 		joystick = nullptr;
+ 	}
++#else
++	g_audioStartTime = time_now_d();
++	joystick = nullptr;
++#endif
+ 	EnableFZ();
+ 	WASM_TRACE("EnableFZ done");
+ 
