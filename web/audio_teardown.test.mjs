@@ -145,6 +145,22 @@ test('AC-4.2: Visibility Suspend/Resume and Deterministic Game A -> XMB Menu -> 
             return badge.includes('ULUS-10336') && host && host.getFrameCount() >= 2 && audio && audio.getStats().enqueuedFrames > 0;
         }, null, { timeout: 10000 });
 
+        // Verify low output sample rate (16 kHz, step > 2.0) resamples cleanly without negative buffer underflow
+        const lowRateFrames = await page.evaluate(() => {
+            const mod = window.__ppssppCoreHost.getModule();
+            const ptr = mod._malloc(128 * 2 * 4);
+            let total = 0;
+            try {
+                for (let i = 0; i < 10; i++) {
+                    total += mod._ppsspp_stream_drain_audio(ptr, 128, 16000);
+                }
+            } finally {
+                mod._free(ptr);
+            }
+            return total;
+        });
+        assert.equal(lowRateFrames, 1280, 'Low-rate 16 kHz audio resampling must drain 10x128 frames cleanly');
+
         await page.click('#btn-return-menu');
         await page.waitForSelector('#viewport-wrapper', { state: 'hidden' });
     } finally {

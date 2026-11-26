@@ -368,7 +368,7 @@ index 9c5e54d..a3909a9 100644
  static void UpdateEmscriptenMainLoopTiming() {
  #if PPSSPP_WASM_MAIN_LOOP_FPS >= 0
  	const int fps = EmscriptenMainLoopFPS();
-@@ -1725,6 +1757,36 @@ static void EmscriptenMainLoop(void *arg) {
+@@ -1725,6 +1757,37 @@ static void EmscriptenMainLoop(void *arg) {
  
  	UpdateEmscriptenMainLoopTiming();
  
@@ -379,6 +379,7 @@ index 9c5e54d..a3909a9 100644
 +			return;
 +		}
 +		if (emuThreadState != (int)EmuThreadState::DISABLED && g_emuThreadFinished.load(std::memory_order_acquire) == 0) {
++			ppsspp_stream_abort_ipc();
 +			EmuThreadStop("shutdown");
 +			for (int i = 0; i < 8 && graphicsContext->ThreadFrameAvailable(); ++i) {}
 +			return;

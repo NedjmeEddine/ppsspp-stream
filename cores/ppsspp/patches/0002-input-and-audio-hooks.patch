@@ -151,7 +151,7 @@ index a3909a9..f554fe3 100644
 +	}
 +
 +	const uint32_t step = (uint32_t)(((uint64_t)pspMixRate << 16) / (uint32_t)outSampleRate);
-+	const int neededSourceSamples = (int)(((uint64_t)sourcePhase + (uint64_t)step * (maxFrames - 1)) >> 16) + 2;
++	const int neededSourceSamples = (int)(((uint64_t)sourcePhase + (uint64_t)step * maxFrames) >> 16) + 2;
 +	if (sourceQueuedSamples < neededSourceSamples) {
 +		const int refillSamples = neededSourceSamples - sourceQueuedSamples + 256;
 +		if (sourceStartSamples > 0 && (sourceStartSamples + sourceQueuedSamples + refillSamples) * 2 > (int)sourceBuffer.size()) {
@@ -182,7 +182,7 @@ index a3909a9..f554fe3 100644
 +	const int consumed = (int)(sourcePhase >> 16);
 +	if (consumed > 0) {
 +		sourceStartSamples += consumed;
-+		sourceQueuedSamples -= consumed;
++		sourceQueuedSamples = std::max(0, sourceQueuedSamples - consumed);
 +		sourcePhase &= 0xFFFF;
 +	}
 +	return maxFrames;
