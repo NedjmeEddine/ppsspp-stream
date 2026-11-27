@@ -561,10 +561,12 @@ func (s *server) handler() http.Handler {
 		case s.coresHandler != nil && strings.HasPrefix(clean, "/cores/"):
 			w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 			w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+			w.Header().Set("Cache-Control", "no-cache")
 			s.coresHandler.ServeHTTP(w, r)
 		case s.webHandler != nil:
 			w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 			w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+			w.Header().Set("Cache-Control", "no-cache")
 			s.webHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)

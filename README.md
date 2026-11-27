@@ -68,3 +68,27 @@ ppsspp-stream/
 ├── Makefile                    # Native test + Emscripten web/vfs.js build
 └── AGENTS.md                   # Agent & developer invariants
 ```
+
+---
+
+## Academic Background & Prior Art
+
+PPSSPP-Stream synthesizes research in out-of-core memory hierarchies, browser-based paging, and trace-driven predictive prefetching:
+
+### Core Papers & Techniques
+* **Predictive Prefetching via Markov Chains:**
+  * Kroeger, T. M., & Long, D. D. (1996). *Predicting File-System Actions from Prior Events*. USENIX Annual Technical Conference (ATC). Explores higher-order and 1st-order Markov models for filesystem block prediction under burst access patterns.
+  * Griffioen, J., & Appleton, R. (1994). *Reducing File System Latency Using a Predictive Approach*. USENIX Summer. Foundation for prefetching file blocks based on transition probability graphs.
+* **Out-of-Core Memory Management & Paging:**
+  * Vitter, J. S. (2001). *External Memory Algorithms and Data Structures: Dealing with Massive Data*. ACM Computing Surveys (CSUR). Theoretical foundations for optimal I/O models and hierarchical caching ($L_1$ RAM $\rightarrow$ $L_2$ SSD $\rightarrow$ $L_3$ Network).
+* **Browser-Native Storage & Multi-Tier Virtual Filesystems:**
+  * W3C Origin Private File System (OPFS) & `FileSystemSyncAccessHandle`: High-performance in-browser raw byte block storage providing low-overhead synchronous page reads/writes.
+  * WebAssembly Threads & Synchronization: `SharedArrayBuffer` with `Atomics.wait` and `Atomics.notify` providing zero-copy synchronous block-fault resolution across web workers.
+
+### Related Open-Source Projects & Upstream Repositories
+* **[wasm-block-streamer](https://github.com/nedjmeddine/wasm-block-streamer)** (`externals/vfs-streamer`): The underlying lock-free 3-tier block streaming engine, OPFS cache manager, and Markov pack toolchain.
+* **[PPSSPP](https://github.com/hrydgard/ppsspp)** (Henrik Rydgård): Upstream Sony PlayStation Portable emulator core providing HLE, GE graphics rendering, and the `BlockDevice` sector interface.
+* **[ppsspp-wasm](https://github.com/root-hunter/ppsspp-wasm)**: Reference Emscripten build configuration, WebGL2 pipeline, and browser bindings for PPSSPP.
+* **[sql.js-httpvfs](https://github.com/phiresky/sql.js-httpvfs)** (phiresky): Pioneering browser HTTP range-request VFS for read-only SQLite databases, demonstrating on-demand page streaming over HTTP 206.
+* **[DuckDB-Wasm](https://github.com/duckdb/duckdb-wasm)**: Production WebAssembly analytical engine featuring HTTPFS range fetching and out-of-core buffer management.
+

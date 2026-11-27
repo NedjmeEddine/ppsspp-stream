@@ -27,8 +27,8 @@ export async function createCoreHost({
     workerA,
     discSize,
     bootPath = '/vfs/game.iso',
-    coreUrl = '/cores/ppsspp/PPSSPPSDL.js',
-    locateFile = (p) => `/cores/ppsspp/${p}`,
+    coreUrl = '/cores/ppsspp/PPSSPPSDL.js?v=2',
+    locateFile = (p) => `/cores/ppsspp/${p}?v=2`,
     onFirstFrame,
     onShutdownComplete,
     onFatal,
@@ -208,7 +208,10 @@ export async function createCoreHost({
 
         let exitCode = 0;
         try {
-            exitCode = mod.callMain([bootPath]);
+            const xres = String(canvas.width || 480);
+            const yres = String(canvas.height || 272);
+            console.info('[ppsspp-stream] booting core', { xres, yres, coreUrl });
+            exitCode = mod.callMain(['--xres', xres, '--yres', yres, bootPath]);
         } catch (err) {
             if (err && typeof err.status === 'number') {
                 exitCode = err.status;
